@@ -236,4 +236,52 @@ final class HelpersTest extends TestCase {
     public function testSnakeCase(): void {
         $this->assertSame('test_name_22', Helpers::snakeCase('Test name (22)'));
     }
+
+    /**
+     * @param bool $expected Resultado esperado.
+     * @param string $key La clave a comprobar.
+     * @param string $pattern El patrón de búsqueda.
+     */
+    #[DataProvider('matchSearchPatternProvider')]
+    public function testMatchSearchPattern(bool $expected, string $key, string $pattern): void {
+        $this->assertSame($expected, Helpers::matchSearchPattern($key, $pattern));
+    }
+
+    public static function matchSearchPatternProvider(): Iterator {
+        // Patrón vacío y comodín total
+        yield 'empty pattern matches all' => [true, 'user:123', ''];
+        yield 'asterisk matches all' => [true, 'user:123', '*'];
+        yield 'asterisk matches empty key' => [true, '', '*'];
+
+        // Búsqueda sin comodines (subcadena, case-insensitive)
+        yield 'substring match' => [true, 'user:123', 'user'];
+        yield 'substring match middle' => [true, 'user:123:active', '123'];
+        yield 'substring match case-insensitive' => [true, 'USER:123', 'user'];
+        yield 'substring no match' => [false, 'user:123', 'admin'];
+
+        // Búsqueda con asterisco (*)
+        yield 'asterisk prefix match' => [true, 'user:123', 'user:*'];
+        yield 'asterisk suffix match' => [true, 'user:123', '*:123'];
+        yield 'asterisk middle match' => [true, 'user:123:active', 'user:*:active'];
+        yield 'asterisk prefix no match' => [false, 'admin:123', 'user:*'];
+        yield 'multiple asterisks match' => [true, 'user:123:session:abc', 'user:*:session:*'];
+        yield 'asterisk case-insensitive' => [true, 'USER:123', 'user:*'];
+
+        // Búsqueda con porcentaje (%)
+        yield 'percent prefix match' => [true, 'user:123', 'user:%'];
+        yield 'percent suffix match' => [true, 'user:123', '%:123'];
+        yield 'percent middle match' => [true, 'user:123:active', 'user:%:active'];
+        yield 'percent prefix no match' => [false, 'admin:123', 'user:%'];
+        yield 'multiple percents match' => [true, 'user:123:session:abc', 'user:%:session:%'];
+
+        // Comodines mezclados
+        yield 'mixed wildcards match' => [true, 'user:123:active', 'user:*:active'];
+        yield 'asterisk and percent match' => [true, 'user:123:active', 'user:%:*'];
+
+        // Casos límite
+        yield 'exact match with asterisk pattern' => [true, 'user', 'user'];
+        yield 'empty key with empty pattern' => [true, '', ''];
+        yield 'empty key with substring pattern' => [false, '', 'user'];
+        yield 'asterisk only in key' => [true, 'user:*:test', 'user:*:test'];
+    }
 }

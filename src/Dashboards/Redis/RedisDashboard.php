@@ -142,12 +142,14 @@ class RedisDashboard implements DashboardInterface {
     private function getNamespacesJson(string $prefix): string {
         header('Content-Type: application/json');
 
-        $result = $this->keysNamespaceView($prefix);
+        $page = (int) Http::get('nspage', 1);
+        $per_page = (int) Http::get('nspp', Config::get('nsperpage', 100));
+        $result = $this->keysNamespaceView($prefix, $page, $per_page);
 
         try {
             return json_encode($result, JSON_THROW_ON_ERROR);
         } catch (\JsonException $e) {
-            return json_encode(['error' => $e->getMessage()]);
+            return (string) json_encode(['error' => $e->getMessage()]);
         }
     }
 

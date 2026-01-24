@@ -183,7 +183,7 @@ trait APCuTrait {
      * @return array<int, array<string, string|int>>
      */
     public function getAllKeys(): array {
-        $search = Http::get('s', '');
+        $search = Http::get('s', '', true);
         $this->template->addGlobal('search_value', $search);
 
         $keys = [];
@@ -194,7 +194,7 @@ trait APCuTrait {
         foreach ($iterator as $item) {
             $key = $item['key'];
 
-            if ($search !== '' && stripos($key, $search) === false) {
+            if ($search !== '' && !Helpers::matchSearchPattern($key, $search)) {
                 continue;
             }
 

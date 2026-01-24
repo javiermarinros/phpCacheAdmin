@@ -35,7 +35,8 @@ class Http {
             }
         }
 
-        $query += $additional;
+        // Usar array_merge para que $additional sobrescriba los valores de $query
+        $query = array_merge($query, $additional);
 
         return $query !== [] ? '?'.http_build_query($query) : '';
     }
@@ -46,18 +47,25 @@ class Http {
      * @template Type
      *
      * @param Type $default
+     * @param bool $raw Si es true, no sanitiza caracteres especiales HTML (útil para búsquedas).
      *
      * @return Type
      */
-    public static function get(string $key, $default = null) {
+    public static function get(string $key, $default = null, bool $raw = false) {
         if (!isset($_GET[$key])) {
             return $default;
         }
 
-        $filter = is_int($default) ? FILTER_SANITIZE_NUMBER_INT : FILTER_SANITIZE_FULL_SPECIAL_CHARS;
-        $value = filter_var($_GET[$key], $filter);
+        if (is_int($default)) {
+            $value = filter_var($_GET[$key], FILTER_SANITIZE_NUMBER_INT);
 
-        return is_int($default) ? (int) $value : $value;
+            return (int) $value;
+        }
+
+        // Si raw es true, usar FILTER_UNSAFE_RAW para no convertir : a &#58; etc.
+        $filter = $raw ? FILTER_UNSAFE_RAW : FILTER_SANITIZE_FULL_SPECIAL_CHARS;
+
+        return filter_var($_GET[$key], $filter);
     }
 
     /**

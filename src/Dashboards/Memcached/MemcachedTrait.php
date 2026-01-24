@@ -209,7 +209,7 @@ trait MemcachedTrait {
      * @throws MemcachedException
      */
     public function getAllKeys(): array {
-        $search = Http::get('s', '');
+        $search = Http::get('s', '', true);
         $this->template->addGlobal('search_value', $search);
 
         $all_key_lines = $this->memcached->getKeys();
@@ -220,8 +220,12 @@ trait MemcachedTrait {
 
         $filtered_lines = [];
         foreach ($all_key_lines as $line) {
-            if (preg_match('/key=(\S+)/', $line, $match) && stripos($match[1], $search) !== false) {
-                $filtered_lines[] = $line;
+            if (preg_match('/key=(\S+)/', $line, $match)) {
+                // Decodificar la clave URL-encoded antes de comparar
+                $keyName = urldecode($match[1]);
+                if (Helpers::matchSearchPattern($keyName, $search)) {
+                    $filtered_lines[] = $line;
+                }
             }
         }
 
@@ -261,12 +265,13 @@ trait MemcachedTrait {
      */
     public function keysTreeView(array $raw_lines): array {
         $separator = $this->servers[$this->current_server]['separator'] ?? ':';
+        $displaySeparator = $separator; // Separador decodificado para paths
 
         if (version_compare($this->memcached->version(), '1.5.19', '>=')) {
             $separator = urlencode($separator);
         }
 
-        $this->template->addGlobal('separator', urldecode($separator));
+        $this->template->addGlobal('separator', $displaySeparator);
 
         $time = time();
 
@@ -286,12 +291,14 @@ trait MemcachedTrait {
             $path = '';
 
             foreach ($parts as $i => $part) {
-                $path = $path !== '' && $path !== '0' ? $path.$separator.$part : $part;
+                $decodedPart = urldecode($part);
+                // Usar separador decodificado para construir el path
+                $path = $path !== '' && $path !== '0' ? $path.$displaySeparator.$decodedPart : $decodedPart;
 
                 if ($i === count($parts) - 1) { // check last part
                     $current[] = [
                         'type' => 'key',
-                        'name' => urldecode($part),
+                        'name' => $decodedPart,
                         'key'  => $key_data['key'],
                         'info' => [
                             'bytes_size'           => $key_data['size'] ?? 0,
@@ -302,7 +309,7 @@ trait MemcachedTrait {
                 } else {
                     $current[$part] ??= [
                         'type' => 'folder',
-                        'name' => $part,
+                        'name' => $decodedPart,
                         'path' => $path,
                         'children' => [],
                         'expanded' => false,
@@ -351,29 +358,42 @@ trait MemcachedTrait {
      *
      * @throws MemcachedException
      *
-     * @return array{namespaces: array<int, array{name: string, path: string, count: int, size: int, percentage: float, has_children: bool, direct_keys: int}>, direct_keys_count: int, direct_keys_size: int, direct_keys_percentage: float}
+     * @param int $page     Página actual (1-based)
+     * @param int $per_page Número de namespaces por página
+     *
+     * @return array{namespaces: array<int, array{name: string, path: string, count: int, size: int, percentage: float, has_children: bool, direct_keys: int, direct_keys_names?: array<int, string>}>, direct_keys_count: int, direct_keys_size: int, direct_keys_percentage: float, direct_keys_names: array<int, string>, pagination: array{page: int, per_page: int, total: int, total_pages: int}}
      */
-    public function keysNamespaceView(string $prefix = ''): array {
+    public function keysNamespaceView(string $prefix = '', int $page = 1, int $per_page = 100): array {
         $separator = $this->servers[$this->current_server]['separator'] ?? ':';
+        $displaySeparator = $separator; // Separador para mostrar y construir paths
+
+        // Asegurar que el prefix está decodificado
+        $prefix = urldecode($prefix);
 
         if (version_compare($this->memcached->version(), '1.5.19', '>=')) {
             $separator = urlencode($separator);
         }
 
-        $this->template->addGlobal('separator', urldecode($separator));
+        $this->template->addGlobal('separator', $displaySeparator);
+        $nsTitleKeys = Config::get('nstitlekeys', 25);
+
+        // Convertir el prefix a formato encoded para comparar con las claves raw
+        $encodedPrefix = $prefix !== '' ? str_replace($displaySeparator, $separator, $prefix) : '';
 
         $namespaces = [];
         $total_size = 0;
         $direct_keys_count = 0;
         $direct_keys_size = 0;
+        /** @var array<int, string> */
+        $direct_keys_names = [];
 
         foreach ($this->keysGenerator() as $keyData) {
             $key = $keyData['key'];
             $size = $keyData['size'];
 
-            // Filter by prefix if it exists
-            if ($prefix !== '') {
-                if (!str_starts_with($key, $prefix.$separator)) {
+            // Filter by prefix if it exists (usando prefix codificado para comparar)
+            if ($encodedPrefix !== '') {
+                if (!str_starts_with($key, $encodedPrefix.$separator)) {
                     continue;
                 }
             }
@@ -381,27 +401,32 @@ trait MemcachedTrait {
             $total_size += $size;
 
             // Extract the current level namespace
-            $keyWithoutPrefix = $prefix !== '' ? substr($key, strlen($prefix) + strlen($separator)) : $key;
+            $keyWithoutPrefix = $encodedPrefix !== '' ? substr($key, strlen($encodedPrefix) + strlen($separator)) : $key;
             $parts = explode($separator, $keyWithoutPrefix);
 
             // Only one part means it's a direct key without sub-namespace
             if (count($parts) === 1) {
                 $direct_keys_count++;
                 $direct_keys_size += $size;
+                // Almacenar el nombre de la clave si hay pocas
+                if ($direct_keys_count <= $nsTitleKeys) {
+                    $direct_keys_names[] = urldecode($parts[0]);
+                }
                 continue;
             }
 
             if (count($parts) > 1) {
                 $ns_name = urldecode($parts[0]);
-                $ns_path = $prefix !== '' ? $prefix.$separator.$parts[0] : $parts[0];
+                $ns_path = $prefix !== '' ? $prefix.$displaySeparator.$ns_name : $ns_name;
 
                 $namespaces[$ns_path] ??= [
-                    'name' => $ns_name,
-                    'path' => $ns_path,
-                    'count' => 0,
-                    'size' => 0,
-                    'has_children' => false,
-                    'direct_keys' => 0,
+                    'name'              => $ns_name,
+                    'path'              => $ns_path,
+                    'count'             => 0,
+                    'size'              => 0,
+                    'has_children'      => false,
+                    'direct_keys'       => 0,
+                    'direct_keys_names' => [],
                 ];
 
                 $namespaces[$ns_path]['count']++;
@@ -413,13 +438,21 @@ trait MemcachedTrait {
                 } else {
                     // It's a direct key of the namespace (e.g.: user:123, not user:123:name)
                     $namespaces[$ns_path]['direct_keys']++;
+                    // Almacenar el nombre de la clave si hay pocas
+                    if ($namespaces[$ns_path]['direct_keys'] <= $nsTitleKeys) {
+                        $namespaces[$ns_path]['direct_keys_names'][] = urldecode($parts[1]);
+                    }
                 }
             }
         }
 
-        // Calculate percentages
+        // Calculate percentages and clean keys names if limit exceeded
         foreach ($namespaces as &$ns) {
             $ns['percentage'] = $total_size > 0 ? round(($ns['size'] / $total_size) * 100, 2) : 0;
+            // Eliminar nombres de claves si hay más del límite
+            if ($ns['direct_keys'] > $nsTitleKeys) {
+                $ns['direct_keys_names'] = [];
+            }
         }
 
         // Sort by size in descending order
@@ -428,11 +461,30 @@ trait MemcachedTrait {
         // Calculate direct keys percentage
         $direct_keys_percentage = $total_size > 0 ? round(($direct_keys_size / $total_size) * 100, 2) : 0;
 
+        // Limpiar nombres de claves directas si hay más del límite
+        if ($direct_keys_count > $nsTitleKeys) {
+            $direct_keys_names = [];
+        }
+
+        // Aplicar paginación
+        $total_namespaces = count($namespaces);
+        $total_pages = (int) ceil($total_namespaces / $per_page);
+        $page = max(1, min($page, max(1, $total_pages)));
+        $offset = ($page - 1) * $per_page;
+        $paginated_namespaces = array_slice(array_values($namespaces), $offset, $per_page);
+
         return [
-            'namespaces'             => array_values($namespaces),
+            'namespaces'             => $paginated_namespaces,
             'direct_keys_count'      => $direct_keys_count,
             'direct_keys_size'       => $direct_keys_size,
             'direct_keys_percentage' => $direct_keys_percentage,
+            'direct_keys_names'      => $direct_keys_names,
+            'pagination'             => [
+                'page'        => $page,
+                'per_page'    => $per_page,
+                'total'       => $total_namespaces,
+                'total_pages' => $total_pages,
+            ],
         ];
     }
 
@@ -648,15 +700,19 @@ trait MemcachedTrait {
 
         $view = Http::get('view', Config::get('listview', 'table'));
 
-        // Namespace view - does not use traditional pagination
+        // Namespace view - usa paginación propia
         if ($view === 'namespaces') {
-            $result = $this->keysNamespaceView();
+            $page = (int) Http::get('nspage', 1);
+            $per_page = (int) Http::get('nspp', Config::get('nsperpage', 100));
+            $result = $this->keysNamespaceView('', $page, $per_page);
 
             return $this->template->render('dashboards/memcached/memcached', [
                 'namespaces'             => $result['namespaces'],
                 'direct_keys_count'      => $result['direct_keys_count'],
                 'direct_keys_size'       => $result['direct_keys_size'],
                 'direct_keys_percentage' => $result['direct_keys_percentage'],
+                'direct_keys_names'      => $result['direct_keys_names'],
+                'ns_pagination'          => $result['pagination'],
                 'keys'                   => [], // No keys in this view
                 'all_keys'               => $this->memcached->getServerStats()['curr_items'],
                 'paginator'              => '',

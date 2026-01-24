@@ -1,6 +1,61 @@
 {% import 'components/macros.twig' as components %}
 {% set show_actions = hide_actions is not defined or hide_actions == false %}
 
+{# Macro para renderizar la paginación de namespaces #}
+{% macro ns_paginator(pagination, base_url) %}
+    {% if pagination is defined and pagination.total_pages > 1 %}
+        {% set page = pagination.page %}
+        {% set total = pagination.total %}
+        {% set total_pages = pagination.total_pages %}
+        {% set per_page = pagination.per_page %}
+        {% set start = ((page - 1) * per_page) + 1 %}
+        {% set end = min(page * per_page, total) %}
+        <div class="namespace-pagination flex items-center justify-between py-2 px-6 border-t border-gray-200 dark:border-gray-700 bg-gray-100 dark:bg-gray-800">
+            <span class="text-xs text-gray-500 dark:text-gray-400">
+                Showing {{ start|number }} - {{ end|number }} of {{ total|number }} namespaces
+            </span>
+            <div class="flex items-center gap-1">
+                {# Botón anterior #}
+                <a href="{{ base_url }}&nspage={{ page - 1 }}"
+                   class="px-2 py-1 text-xs rounded bg-white dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 {{ page <= 1 ? 'opacity-50 pointer-events-none' : '' }}">
+                    &laquo;
+                </a>
+
+                {# Páginas #}
+                {% set show_pages = 2 %}
+                {% if total_pages > (show_pages * 2) + 2 %}
+                    <a href="{{ base_url }}&nspage=1"
+                       class="px-2 py-1 text-xs rounded {{ page == 1 ? 'bg-primary-500 text-white' : 'bg-white dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600' }}">1</a>
+
+                    {% set i = max(2, page - show_pages) %}
+                    {% if i > 2 %}<span class="px-1 text-gray-400">...</span>{% endif %}
+
+                    {% for p in range(i, min(page + show_pages, total_pages - 1)) %}
+                        <a href="{{ base_url }}&nspage={{ p }}"
+                           class="px-2 py-1 text-xs rounded {{ page == p ? 'bg-primary-500 text-white' : 'bg-white dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600' }}">{{ p }}</a>
+                    {% endfor %}
+
+                    {% if (page + show_pages + 1) < total_pages %}<span class="px-1 text-gray-400">...</span>{% endif %}
+
+                    <a href="{{ base_url }}&nspage={{ total_pages }}"
+                       class="px-2 py-1 text-xs rounded {{ page == total_pages ? 'bg-primary-500 text-white' : 'bg-white dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600' }}">{{ total_pages }}</a>
+                {% else %}
+                    {% for p in range(1, total_pages) %}
+                        <a href="{{ base_url }}&nspage={{ p }}"
+                           class="px-2 py-1 text-xs rounded {{ page == p ? 'bg-primary-500 text-white' : 'bg-white dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600' }}">{{ p }}</a>
+                    {% endfor %}
+                {% endif %}
+
+                {# Botón siguiente #}
+                <a href="{{ base_url }}&nspage={{ page + 1 }}"
+                   class="px-2 py-1 text-xs rounded bg-white dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 {{ page >= total_pages ? 'opacity-50 pointer-events-none' : '' }}">
+                    &raquo;
+                </a>
+            </div>
+        </div>
+    {% endif %}
+{% endmacro %}
+
 <div class="namespaceview" data-separator="{{ separator }}">
     <div class="flex gap-2 py-2 px-6 border-t border-gray-200 dark:border-gray-700">
         <div title="Check all">{{ components.checkbox('check-all', namespaces|length == 0) }}</div>
@@ -11,7 +66,7 @@
     <div class="namespace-content">
         {% if direct_keys_count is defined and direct_keys_count > 0 %}
             <div class="flex gap-1 items-center py-2 px-6 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50">
-                <span class="flex-1 text-sm text-gray-600 dark:text-gray-400">
+                <span class="flex-1 text-sm text-gray-600 dark:text-gray-400"{% if direct_keys_names is defined and direct_keys_names|length > 0 %} title="{{ direct_keys_names|join(', ')|e('html_attr') }}"{% endif %}>
                     <span class="font-medium">{{ direct_keys_count|number }}</span> direct key{{ direct_keys_count > 1 ? 's' : '' }} (not in any namespace)
                 </span>
                 <div class="flex items-center gap-1 text-sm">
@@ -30,6 +85,10 @@
                 </div>
             </div>
         {% endif %}
+
+        {# Paginación superior #}
+        {{ _self.ns_paginator(ns_pagination, link([], {'view': 'namespaces'})) }}
+
         {% for ns in namespaces %}
             <div class="namespace-item border-t border-gray-200 dark:border-gray-700" data-namespace="{{ ns.path }}" data-has-children="{{ ns.has_children ? '1' : '0' }}">
                 <div class="flex gap-1 items-center py-2 px-6 hover:bg-gray-50 dark:hover:bg-white/5">
@@ -54,6 +113,9 @@
                             </div>
                         </span>
                         {% if show_actions %}
+                            <a href="{{ link([], {'view': 'table', 's': ns.path ~ separator ~ '*'}) }}" class="inline-flex gap-1 items-center font-semibold text-primary-500 hover:text-primary-700" title="Filter keys in this namespace">
+                                {{ svg('search', 16) }} Filter
+                            </a>
                             <button class="inline-flex gap-1 items-center font-semibold text-red-500 hover:text-red-700 delete-namespace" type="button" title="Delete all keys in namespace" data-namespace="{{ ns.path }}">
                                 {{ svg('trash', 16) }} Delete
                             </button>
@@ -72,10 +134,15 @@
                 </div>
             </div>
         {% else %}
-            <div class="py-4 px-6 border-t border-gray-200 dark:border-gray-700 text-center text-gray-500 dark:text-gray-400">
-                No namespaces found.
-            </div>
+            {% if ns_pagination is not defined or ns_pagination.total == 0 %}
+                <div class="py-4 px-6 border-t border-gray-200 dark:border-gray-700 text-center text-gray-500 dark:text-gray-400">
+                    No namespaces found.
+                </div>
+            {% endif %}
         {% endfor %}
+
+        {# Paginación inferior #}
+        {{ _self.ns_paginator(ns_pagination, link([], {'view': 'namespaces'})) }}
     </div>
 </div>
 

@@ -117,7 +117,7 @@ trait OPCacheTrait {
      */
     private function getCachedScripts(): array {
         $cached_scripts = [];
-        $search = Http::get('s', '');
+        $search = Http::get('s', '', true);
 
         $this->template->addGlobal('search_value', $search);
 

@@ -276,6 +276,33 @@ class Helpers {
     }
 
     /**
+     * Comprueba si una clave coincide con un patrón de búsqueda.
+     * Soporta comodines: * y % coinciden con cualquier secuencia de caracteres.
+     *
+     * @param string $key     La clave a comprobar.
+     * @param string $pattern El patrón de búsqueda (puede contener * o % como comodines).
+     */
+    public static function matchSearchPattern(string $key, string $pattern): bool {
+        if ($pattern === '' || $pattern === '*') {
+            return true;
+        }
+
+        // Si no hay comodines, hacer búsqueda por subcadena (case-insensitive)
+        if (!str_contains($pattern, '*') && !str_contains($pattern, '%')) {
+            return stripos($key, $pattern) !== false;
+        }
+
+        // Escapar caracteres especiales de regex
+        $regex = preg_quote($pattern, '/');
+
+        // Reemplazar los comodines escapados por el patrón regex correspondiente
+        // preg_quote escapa * como \* y % no se escapa (no es especial en regex)
+        $regex = str_replace(['\\*', '%'], '.*', $regex);
+
+        return preg_match('/^' . $regex . '$/i', $key) === 1;
+    }
+
+    /**
      * @param array<int|string, mixed> $panel_data
      */
     public static function getPanelsJson(array $panel_data): string {

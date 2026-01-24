@@ -55,6 +55,18 @@ const query_params = (params) => {
     location.href = url.toString();
 };
 
+const build_query_string = (params) => {
+    const url = new URL(location.href);
+    const search_params = new URLSearchParams(url.search);
+
+    Object.entries(params).forEach(([key, value]) => {
+        value === null ? search_params.delete(key) : search_params.set(key, String(value));
+    });
+
+    url.search = search_params.toString();
+    return url.toString();
+};
+
 const select_and_redirect = (id, param) => {
     $id(id)?.addEventListener('change', e => query_params({[param]: e.target.value}));
 };
@@ -591,6 +603,7 @@ const init_namespace_view = () => {
 
     const CHEVRON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 16 16" width="10" height="10" class="-rotate-90 transition-transform"><path d="M8.015 11.2c-.3 0-.6-.1-.8-.4L3.015 5.5c-.3-.4-.3-.9.1-1.3.4-.3.9-.3 1.3.1l3.6 4.5 3.6-4.5c.3-.4.9-.4 1.3-.1s.4.9.1 1.3l-4.2 5.3c-.2.3-.5.4-.8.4Z"/></svg>`;
     const TRASH_SVG = `<svg xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 16 16" width="16" height="16"><path d="M2.5 1a1 1 0 0 0-1 1v1a1 1 0 0 0 1 1H3v9a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V4h.5a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H10a1 1 0 0 0-1-1H7a1 1 0 0 0-1 1H2.5zm3 4a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-1 0v-7a.5.5 0 0 1 .5-.5zM8 5a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-1 0v-7A.5.5 0 0 1 8 5zm3 .5v7a.5.5 0 0 1-1 0v-7a.5.5 0 0 1 1 0z"/></svg>`;
+    const SEARCH_SVG = `<svg xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 16 16" width="16" height="16"><path d="M6 2C3.8 2 2 3.8 2 6s1.8 4 4 4 4-1.8 4-4-1.8-4-4-4zM0 6a6.02 6.02 0 0 1 6-6 6.02 6.02 0 0 1 6 6c0 1.2-.4 2.5-1.1 3.5l4.8 4.8c.4.4.4 1 0 1.4s-1 .4-1.4 0l-4.8-4.8C6.8 12.8 3 12.2 1.1 9.5A6.06 6.06 0 0 1 0 6z"/></svg>`;
     const SPINNER_SVG = `<svg class="inline-block w-4 h-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>`;
 
     const toggle_svg = (toggle, expanded) => {
@@ -599,11 +612,61 @@ const init_namespace_view = () => {
         svg.classList.toggle('-rotate-90', !expanded);
     };
 
+    const render_pagination = (pagination, namespace_path) => {
+        if (!pagination || pagination.total_pages <= 1) return null;
+
+        const { page, total, total_pages, per_page } = pagination;
+        const div = document.createElement('div');
+        div.className = 'namespace-pagination flex items-center justify-between py-2 px-6 border-t border-gray-200 dark:border-gray-700 bg-gray-100 dark:bg-gray-800';
+        div.dataset.namespace = namespace_path;
+        div.dataset.currentPage = page;
+        div.dataset.perPage = per_page;
+
+        const start = ((page - 1) * per_page) + 1;
+        const end = Math.min(page * per_page, total);
+
+        let pages_html = '';
+        const show_pages = 2;
+
+        if (total_pages > (show_pages * 2) + 2) {
+            pages_html += `<button class="ns-page-btn px-2 py-1 text-xs rounded ${page === 1 ? 'bg-primary-500 text-white' : 'bg-white dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600'}" data-page="1">1</button>`;
+
+            let i = Math.max(2, page - show_pages);
+            if (i > 2) pages_html += '<span class="px-1 text-gray-400">...</span>';
+
+            const min = Math.min(page + show_pages, total_pages - 1);
+            for (; i <= min; i++) {
+                pages_html += `<button class="ns-page-btn px-2 py-1 text-xs rounded ${page === i ? 'bg-primary-500 text-white' : 'bg-white dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600'}" data-page="${i}">${i}</button>`;
+            }
+
+            if (i < total_pages) pages_html += '<span class="px-1 text-gray-400">...</span>';
+            pages_html += `<button class="ns-page-btn px-2 py-1 text-xs rounded ${page === total_pages ? 'bg-primary-500 text-white' : 'bg-white dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600'}" data-page="${total_pages}">${total_pages}</button>`;
+        } else {
+            for (let i = 1; i <= total_pages; i++) {
+                pages_html += `<button class="ns-page-btn px-2 py-1 text-xs rounded ${page === i ? 'bg-primary-500 text-white' : 'bg-white dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600'}" data-page="${i}">${i}</button>`;
+            }
+        }
+
+        div.innerHTML = `
+            <span class="text-xs text-gray-500 dark:text-gray-400">
+                Showing ${format_number(start)} - ${format_number(end)} of ${format_number(total)} namespaces
+            </span>
+            <div class="flex items-center gap-1">
+                <button class="ns-page-prev px-2 py-1 text-xs rounded bg-white dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed" ${page <= 1 ? 'disabled' : ''} data-page="${page - 1}">&laquo;</button>
+                ${pages_html}
+                <button class="ns-page-next px-2 py-1 text-xs rounded bg-white dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed" ${page >= total_pages ? 'disabled' : ''} data-page="${page + 1}">&raquo;</button>
+            </div>`;
+        return div;
+    };
+
     const render_namespace_item = (ns, separator) => {
         const item = document.createElement('div');
         item.className = 'namespace-item border-t border-gray-200 dark:border-gray-700';
         item.dataset.namespace = ns.path;
         item.dataset.hasChildren = ns.has_children ? '1' : '0';
+
+        // Generar URL de filtro usando path completo
+        const filterUrl = build_query_string({view: 'table', s: ns.path + separator + '*'});
 
         item.innerHTML = `
             <div class="flex gap-1 items-center py-2 px-6 hover:bg-gray-50 dark:hover:bg-white/5">
@@ -621,6 +684,7 @@ const init_namespace_view = () => {
                             <span class="text-xs text-gray-500 dark:text-gray-400 w-12 text-right">${ns.percentage.toFixed(1)}%</span>
                         </div>
                     </span>
+                    <a href="${filterUrl}" class="inline-flex gap-1 items-center font-semibold text-primary-500 hover:text-primary-700" title="Filter keys in this namespace">${SEARCH_SVG} Filter</a>
                     <button class="inline-flex gap-1 items-center font-semibold text-red-500 hover:text-red-700 delete-namespace" type="button" title="Delete all keys in namespace" data-namespace="${ns.path}">${TRASH_SVG} Delete</button>
                 </div>
             </div>
@@ -631,12 +695,15 @@ const init_namespace_view = () => {
         return item;
     };
 
-    const render_direct_keys_info = (count, size, percentage) => {
+    const render_direct_keys_info = (count, size, percentage, names = []) => {
         if (count <= 0) return null;
         const div = document.createElement('div');
         div.className = 'flex gap-1 items-center py-2 px-6 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50';
+        // Escapar comillas y caracteres especiales en los nombres de claves
+        const escapeAttr = (str) => str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const titleAttr = names?.length > 0 ? ` title="${escapeAttr(names.join(', '))}"` : '';
         div.innerHTML = `
-            <span class="flex-1 text-sm text-gray-600 dark:text-gray-400">
+            <span class="flex-1 text-sm text-gray-600 dark:text-gray-400"${titleAttr}>
                 <span class="font-medium">${format_number(count)}</span> direct key${count > 1 ? 's' : ''} (not in any namespace)
             </span>
             <div class="flex items-center gap-1 text-sm">
@@ -654,27 +721,55 @@ const init_namespace_view = () => {
         return div;
     };
 
-    const render_child_namespaces = (container, namespaces, separator, direct_keys_count = 0, direct_keys_size = 0, direct_keys_percentage = 0) => {
+    const render_child_namespaces = (container, response, separator, namespace_path) => {
+        const namespaces = response.namespaces || [];
+        const direct_keys_count = response.direct_keys_count || 0;
+        const direct_keys_size = response.direct_keys_size || 0;
+        const direct_keys_percentage = response.direct_keys_percentage || 0;
+        const direct_keys_names = response.direct_keys_names || [];
+        const pagination = response.pagination || null;
+
         container.innerHTML = '';
-        const direct_info = render_direct_keys_info(direct_keys_count, direct_keys_size, direct_keys_percentage);
+
+        // Mostrar info de claves directas
+        const direct_info = render_direct_keys_info(direct_keys_count, direct_keys_size, direct_keys_percentage, direct_keys_names);
         if (direct_info) container.appendChild(direct_info);
+
+        // Mostrar paginación superior si hay más de una página
+        const pagination_top = render_pagination(pagination, namespace_path);
+        if (pagination_top) container.appendChild(pagination_top);
+
+        // Renderizar namespaces
         namespaces.forEach(ns => container.appendChild(render_namespace_item(ns, separator)));
+
+        // Mostrar paginación inferior
+        const pagination_bottom = render_pagination(pagination, namespace_path);
+        if (pagination_bottom) container.appendChild(pagination_bottom);
+
         init_namespace_handlers();
+        init_pagination_handlers(namespace_path, container);
     };
 
-    const load_child_namespaces = (namespace_path, container, loading, content, toggle) => {
-        if (content.dataset.loaded === 'true') {
+    const load_child_namespaces = (namespace_path, container, loading, content, toggle, page = 1) => {
+        // Si ya está cargado y no es un cambio de página, solo toggle
+        if (content.dataset.loaded === 'true' && page === 1 && !content.dataset.reloading) {
             container.classList.toggle('hidden');
             toggle_svg(toggle, !container.classList.contains('hidden'));
             return;
+        }
+
+        // Limpiar contenido y mostrar loading al cambiar de página
+        if (content.dataset.reloading) {
+            content.innerHTML = '';
         }
 
         loading.classList.remove('hidden');
         container.classList.remove('hidden');
         toggle_svg(toggle, true);
 
-        ajax(`namespaces=${encodeURIComponent(namespace_path)}`, function (request) {
+        ajax(`namespaces=${encodeURIComponent(namespace_path)}&nspage=${page}`, function (request) {
             loading.classList.add('hidden');
+            content.dataset.reloading = '';
 
             if (is_success_status(this.status)) {
                 try {
@@ -686,13 +781,11 @@ const init_namespace_view = () => {
                     } else {
                         const namespaces = response.namespaces || [];
                         const direct_keys_count = response.direct_keys_count || 0;
-                        const direct_keys_size = response.direct_keys_size || 0;
-                        const direct_keys_percentage = response.direct_keys_percentage || 0;
 
                         if (!namespaces.length && direct_keys_count === 0) {
                             content.innerHTML = '<div class="py-4 px-6 text-gray-500 dark:text-gray-400">No child namespaces.</div>';
                         } else {
-                            render_child_namespaces(content, namespaces, separator, direct_keys_count, direct_keys_size, direct_keys_percentage);
+                            render_child_namespaces(content, response, separator, namespace_path);
                         }
                     }
                     content.dataset.loaded = 'true';
@@ -702,6 +795,31 @@ const init_namespace_view = () => {
             } else {
                 content.innerHTML = '<div class="py-4 px-6 text-red-500">Error loading namespaces</div>';
             }
+        });
+    };
+
+    const init_pagination_handlers = (namespace_path, container) => {
+        container.querySelectorAll('.namespace-pagination').forEach(paginationEl => {
+            paginationEl.querySelectorAll('.ns-page-btn, .ns-page-prev, .ns-page-next').forEach(btn => {
+                if (btn.disabled) return;
+                init_once(btn, (el) => {
+                    el.addEventListener('click', function () {
+                        const page = parseInt(this.dataset.page, 10);
+                        if (isNaN(page) || page < 1) return;
+
+                        const ns = paginationEl.dataset.namespace;
+                        const item = container.closest('.namespace-item') || container.closest('.namespaceview');
+                        const childrenContainer = item.querySelector(`.namespace-children[data-namespace="${ns}"]`) || container;
+                        const content = childrenContainer.querySelector('.namespace-children-content') || container;
+                        const loading = childrenContainer.querySelector('.namespace-loading');
+                        const toggle = item.querySelector(`.namespace-toggle[data-namespace="${ns}"]`);
+
+                        content.dataset.loaded = '';
+                        content.dataset.reloading = 'true';
+                        load_child_namespaces(ns, childrenContainer, loading, content, toggle, page);
+                    });
+                });
+            });
         });
     };
 

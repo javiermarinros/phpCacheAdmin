@@ -17,7 +17,7 @@ return [
      *
      * You can comment out (or delete) any dashboard.
      */
-    'dashboards'     => [
+    'dashboards' => [
         RobiNN\Pca\Dashboards\Server\ServerDashboard::class,
         RobiNN\Pca\Dashboards\Redis\RedisDashboard::class,
         RobiNN\Pca\Dashboards\Memcached\MemcachedDashboard::class,
@@ -25,7 +25,7 @@ return [
         RobiNN\Pca\Dashboards\APCu\APCuDashboard::class,
         RobiNN\Pca\Dashboards\Realpath\RealpathDashboard::class,
     ],
-    'redis'          => [
+    'redis' => [
         [
             'name' => 'Localhost', // The server name (optional).
             'host' => '127.0.0.1', // Optional when a path or nodes is specified.
@@ -52,7 +52,7 @@ return [
             //'separator' => ':', // Separator for tree view (optional)
         ],
     ],
-    'memcached'      => [
+    'memcached' => [
         [
             'name' => 'Localhost', // The server name, optional.
             'host' => '127.0.0.1', // Optional when a path is specified.
@@ -98,22 +98,22 @@ return [
         }
     },*/
     // Decoding / Encoding functions
-    'converters'     => [
+    'converters' => [
         'gzcompress' => [
-            'view' => static fn (string $value): ?string => @gzuncompress($value) !== false ? gzuncompress($value) : null,
-            'save' => static fn (string $value): string => gzcompress($value),
+            'view' => static fn(string $value): ?string => @gzuncompress($value) !== false ? gzuncompress($value) : null,
+            'save' => static fn(string $value): string => gzcompress($value),
         ],
-        'gzencode'   => [
-            'view' => static fn (string $value): ?string => @gzdecode($value) !== false ? gzdecode($value) : null,
-            'save' => static fn (string $value): string => gzencode($value),
+        'gzencode' => [
+            'view' => static fn(string $value): ?string => @gzdecode($value) !== false ? gzdecode($value) : null,
+            'save' => static fn(string $value): string => gzencode($value),
         ],
-        'gzdeflate'  => [
-            'view' => static fn (string $value): ?string => @gzinflate($value) !== false ? gzinflate($value) : null,
-            'save' => static fn (string $value): string => gzdeflate($value),
+        'gzdeflate' => [
+            'view' => static fn(string $value): ?string => @gzinflate($value) !== false ? gzinflate($value) : null,
+            'save' => static fn(string $value): string => gzdeflate($value),
         ],
-        'zlib'       => [
-            'view' => static fn (string $value): ?string => @zlib_decode($value) !== false ? zlib_decode($value) : null,
-            'save' => static fn (string $value): string => zlib_encode($value, ZLIB_ENCODING_DEFLATE),
+        'zlib' => [
+            'view' => static fn(string $value): ?string => @zlib_decode($value) !== false ? zlib_decode($value) : null,
+            'save' => static fn(string $value): string => zlib_encode($value, ZLIB_ENCODING_DEFLATE),
         ],
         /*'gz_magento' => [
             'view' => static function (string $value): ?string {
@@ -126,7 +126,7 @@ return [
         ],*/
     ],
     // Formatting functions, it runs after decoding
-    'formatters'     => [
+    'formatters' => [
         'unserialize' => static function (string $value): ?string {
             $unserialized_value = @unserialize($value, ['allowed_classes' => false]);
             if ($unserialized_value !== false && is_array($unserialized_value)) {
@@ -142,16 +142,18 @@ return [
     ],
     // Customizations
     //'timezone'       => 'Europe/Bratislava', // Leave empty (or commented out) to get it automatically obtained.
-    'timeformat'     => 'd. m. Y H:i:s',
-    'decimalsep'     => ',',
-    'thousandssep'   => ' ',
-    'listview'       => 'table', // table/tree - default key list view
-    'panelrefresh'   => 30, // In seconds, refresh interval for panels - default 30
+    'timeformat' => 'd. m. Y H:i:s',
+    'decimalsep' => ',',
+    'thousandssep' => ' ',
+    'listview' => 'table', // table/tree - default key list view
+    'panelrefresh' => 30, // In seconds, refresh interval for panels - default 30
     'metricsrefresh' => 60, // In seconds, refresh interval for metrics - default 60
-    'metricstab'     => 1440, // Default tab in metrics, 60 - Last hour, 1440 - Last day, 10080 - Last week, 43200 - Last month - default 1440
-    'hash'           => 'pca', // Any random string to secure a metrics DB file.
-    'metricsdir'     => __DIR__.'/tmp/metrics', // Directory for metrics DB files.
-    'twigcache'      => __DIR__.'/tmp/twig', // Directory for Twig cache files.
+    'nsperpage' => 100, // Number of namespaces per page in namespace view (optional)
+    'nstitlekeys' => 25, // Max keys in a namespace to show the list in title attribute - default 25
+    'metricstab' => 1440, // Default tab in metrics, 60 - Last hour, 1440 - Last day, 10080 - Last week, 43200 - Last month - default 1440
+    'hash' => 'pca', // Any random string to secure a metrics DB file.
+    'metricsdir' => __DIR__ . '/tmp/metrics', // Directory for metrics DB files.
+    'twigcache' => __DIR__ . '/tmp/twig', // Directory for Twig cache files.
     //'pcapath'        => 'vendor/robinn/phpcacheadmin/', // Path to the package when installed via composer. Used for assets.
     //'url'            => '/', // URL to the dashboard when installed via composer, e.g., /phpcacheadmin
 ];

@@ -412,7 +412,7 @@ trait RedisTrait {
      * @throws Exception
      */
     public function getAllKeys(): array {
-        $filter = Http::get('s', '*');
+        $filter = Http::get('s', '*', true);
         $this->template->addGlobal('search_value', $filter);
 
         if (isset($this->servers[$this->current_server]['scansize']) || !$this->isCommandSupported('KEYS')) {
@@ -547,7 +547,7 @@ trait RedisTrait {
      * @throws Exception
      */
     private function keysGenerator(): \Generator {
-        $filter = Http::get('s', '*');
+        $filter = Http::get('s', '*', true);
 
         if (isset($this->servers[$this->current_server]['scansize']) || !$this->isCommandSupported('KEYS')) {
             $scansize = (int) ($this->servers[$this->current_server]['scansize'] ?? 1000);
@@ -576,23 +576,28 @@ trait RedisTrait {
      * Gets namespace statistics for a given prefix.
      *
      * @param string $prefix
+     * @param int    $page     Página actual (1-based)
+     * @param int    $per_page Número de namespaces por página
      *
-     * @return array{namespaces: array<int, array{name: string, path: string, count: int, size: int, percentage: float, has_children: bool, direct_keys: int}>, direct_keys_count: int, direct_keys_size: int, direct_keys_percentage: float}
+     * @return array{namespaces: array<int, array{name: string, path: string, count: int, size: int, percentage: float, has_children: bool, direct_keys: int, direct_keys_names?: array<int, string>}>, direct_keys_count: int, direct_keys_size: int, direct_keys_percentage: float, direct_keys_names: array<int, string>, pagination: array{page: int, per_page: int, total: int, total_pages: int}}
      *
      * @throws Exception
      */
-    public function keysNamespaceView(string $prefix = ''): array {
+    public function keysNamespaceView(string $prefix = '', int $page = 1, int $per_page = 100): array {
         $separator = $this->servers[$this->current_server]['separator'] ?? ':';
         $this->template->addGlobal('separator', $separator);
+        $nsTitleKeys = Config::get('nstitlekeys', 25);
 
         $namespaces = [];
         $total_size = 0;
         $total_count = 0;
         $direct_keys_count = 0;
         $direct_keys_size = 0;
+        /** @var array<int, string> */
+        $direct_keys_names = [];
 
         // Add prefix to search filter if it exists
-        $original_search = Http::get('s', '*');
+        $original_search = Http::get('s', '*', true);
         if ($prefix !== '') {
             $_GET['s'] = $prefix.$separator.'*';
         }
@@ -611,6 +616,10 @@ trait RedisTrait {
             if (count($parts) === 1) {
                 $direct_keys_count++;
                 $direct_keys_size += $size;
+                // Almacenar el nombre de la clave si hay pocas
+                if ($direct_keys_count <= $nsTitleKeys) {
+                    $direct_keys_names[] = $parts[0];
+                }
                 continue;
             }
 
@@ -620,12 +629,13 @@ trait RedisTrait {
 
                 if (!isset($namespaces[$ns_path])) {
                     $namespaces[$ns_path] = [
-                        'name'         => $ns_name,
-                        'path'         => $ns_path,
-                        'count'        => 0,
-                        'size'         => 0,
-                        'has_children' => false,
-                        'direct_keys'  => 0,
+                        'name'              => $ns_name,
+                        'path'              => $ns_path,
+                        'count'             => 0,
+                        'size'              => 0,
+                        'has_children'      => false,
+                        'direct_keys'       => 0,
+                        'direct_keys_names' => [],
                     ];
                 }
 
@@ -638,6 +648,10 @@ trait RedisTrait {
                 } else {
                     // It's a direct key of the namespace (e.g.: user:123, not user:123:name)
                     $namespaces[$ns_path]['direct_keys']++;
+                    // Almacenar el nombre de la clave si hay pocas
+                    if ($namespaces[$ns_path]['direct_keys'] <= $nsTitleKeys) {
+                        $namespaces[$ns_path]['direct_keys_names'][] = $parts[1];
+                    }
                 }
             }
         }
@@ -647,9 +661,13 @@ trait RedisTrait {
             $_GET['s'] = $original_search;
         }
 
-        // Calculate percentages
+        // Calculate percentages and clean keys names if limit exceeded
         foreach ($namespaces as &$ns) {
             $ns['percentage'] = $total_size > 0 ? round(($ns['size'] / $total_size) * 100, 2) : 0;
+            // Eliminar nombres de claves si hay más del límite
+            if ($ns['direct_keys'] > $nsTitleKeys) {
+                $ns['direct_keys_names'] = [];
+            }
         }
 
         // Sort by size in descending order
@@ -658,11 +676,30 @@ trait RedisTrait {
         // Calculate direct keys percentage
         $direct_keys_percentage = $total_size > 0 ? round(($direct_keys_size / $total_size) * 100, 2) : 0;
 
+        // Limpiar nombres de claves directas si hay más del límite
+        if ($direct_keys_count > $nsTitleKeys) {
+            $direct_keys_names = [];
+        }
+
+        // Aplicar paginación
+        $total_namespaces = count($namespaces);
+        $total_pages = (int) ceil($total_namespaces / $per_page);
+        $page = max(1, min($page, max(1, $total_pages)));
+        $offset = ($page - 1) * $per_page;
+        $paginated_namespaces = array_slice(array_values($namespaces), $offset, $per_page);
+
         return [
-            'namespaces'             => array_values($namespaces),
+            'namespaces'             => $paginated_namespaces,
             'direct_keys_count'      => $direct_keys_count,
             'direct_keys_size'       => $direct_keys_size,
             'direct_keys_percentage' => $direct_keys_percentage,
+            'direct_keys_names'      => $direct_keys_names,
+            'pagination'             => [
+                'page'        => $page,
+                'per_page'    => $per_page,
+                'total'       => $total_namespaces,
+                'total_pages' => $total_pages,
+            ],
         ];
     }
 
@@ -784,15 +821,19 @@ trait RedisTrait {
 
         $view = Http::get('view', Config::get('listview', 'table'));
 
-        // Namespace view - does not use traditional pagination
+        // Namespace view - usa paginación propia
         if ($view === 'namespaces') {
-            $result = $this->keysNamespaceView();
+            $page = (int) Http::get('nspage', 1);
+            $per_page = (int) Http::get('nspp', Config::get('nsperpage', 100));
+            $result = $this->keysNamespaceView('', $page, $per_page);
 
             return $this->template->render('dashboards/redis/redis', [
                 'namespaces'             => $result['namespaces'],
                 'direct_keys_count'      => $result['direct_keys_count'],
                 'direct_keys_size'       => $result['direct_keys_size'],
                 'direct_keys_percentage' => $result['direct_keys_percentage'],
+                'direct_keys_names'      => $result['direct_keys_names'],
+                'ns_pagination'          => $result['pagination'],
                 'keys'                   => [], // No keys in this view
                 'all_keys'               => $this->redis->databaseSize(),
                 'paginator'              => '',
