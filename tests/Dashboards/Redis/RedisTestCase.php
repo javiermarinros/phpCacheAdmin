@@ -625,7 +625,7 @@ abstract class RedisTestCase extends TestCase {
         $html = $this->dashboard->ajax();
 
         $this->assertStringContainsString('Encoding', $html);
-        $this->assertStringContainsString('12,00B', $html); // the size of the value itself
+        $this->assertStringContainsString('12B', $html); // the size of the value itself
     }
 
     /**

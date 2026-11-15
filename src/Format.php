@@ -30,7 +30,8 @@ class Format {
             return sprintf('%sKB', self::number($bytes / 1024, $decimals));
         }
 
-        return sprintf('%sB', self::number($bytes, $decimals));
+        // A byte count has no fraction: 0B, not 0,00B.
+        return sprintf('%sB', self::number($bytes, 0));
     }
 
     /**

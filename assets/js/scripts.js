@@ -105,7 +105,8 @@ function format_bytes(bytes, decimals = 2) {
         return number_format(bytes / 1024, decimals) + 'KB';
     }
 
-    return number_format(bytes, decimals) + 'B';
+    // A byte count has no fraction: 0B, not 0,00B.
+    return number_format(bytes, 0) + 'B';
 }
 
 class TreeView {
