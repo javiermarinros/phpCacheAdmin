@@ -7,6 +7,12 @@
     <title>{{ site_title }} - phpCacheAdmin</title>
     <link rel="icon" type="image/png" sizes="32x32" href="{{ config('pcapath', '') }}assets/favicon.png">
     <meta name="theme-color" content="#ffffff">
+    <script nonce="{{ nonce }}">
+        // The browser skips the page transition (@view-transition in the CSS) when this page is painted late,
+        // e.g. a slow response or a hidden window, and rejects its ready promise. That is expected, not an error.
+        // It has to run before the stylesheet: a script after it waits until the stylesheet has loaded.
+        document.activeViewTransition?.ready.catch(() => {});
+    </script>
     <link rel="stylesheet" href="{{ asset('assets/css/styles.css') }}">
     <meta name="csrf-token" content="{{ csrf }}">
 

@@ -6,6 +6,10 @@
     <meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex">
     <title>Login - phpCacheAdmin</title>
     <link rel="icon" type="image/png" sizes="32x32" href="{{ config('pcapath', '') }}assets/favicon.png">
+    <script nonce="{{ nonce }}">
+        // A skipped page transition is expected, see layout.twig. Before the stylesheet, so it runs right away.
+        document.activeViewTransition?.ready.catch(() => {});
+    </script>
     <link rel="stylesheet" href="{{ config('pcapath', '') }}assets/css/styles.css?v={{ version }}">
     <script nonce="{{ nonce }}">
         const theme = localStorage.getItem('theme') || 'system';
