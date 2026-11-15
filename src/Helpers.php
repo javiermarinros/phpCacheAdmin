@@ -526,114 +526,81 @@ class Helpers {
     }
 
     /**
-     * The namespace sent by the delete button of the namespace view (a JSON string, like the keys of deleteKey()).
-     * Empty when nothing valid was sent.
+     * One request of a namespace delete from the namespace view. The browser repeats it with the returned cursor until
+     * the cursor is '0', then shows the alert.
+     *
+     * @param callable(string, string): array{cursor: string, deleted: int} $delete_step Namespace, cursor => result.
      */
-    public static function namespaceFromPost(): string {
-        try {
-            $namespace = json_decode(Http::post('deletenamespace', ''), false, 512, JSON_THROW_ON_ERROR);
-        } catch (JsonException) {
-            $namespace = '';
+    public static function deleteNamespaceAjax(callable $delete_step): string {
+        $namespace = (string) Http::post('deletenamespace', '');
+
+        if ($namespace === '') {
+            return self::alert('No namespace is selected.', 'error');
         }
 
-        return is_string($namespace) ? $namespace : '';
+        $step = $delete_step($namespace, (string) Http::post('cursor', '0'));
+        $deleted = Http::post('deleted', 0) + $step['deleted'];
+        $done = $step['cursor'] === '0';
+
+        if (!headers_sent()) {
+            header('Content-Type: application/json');
+        }
+
+        return self::ajaxJson([
+            'cursor'  => $step['cursor'],
+            'deleted' => $deleted,
+            'alert'   => $done ? self::alert(sprintf('Deleted %s keys from namespace "%s".', Format::number($deleted), htmlspecialchars($namespace)), 'success') : null,
+        ]);
     }
 
     /**
-     * Groups keys by the next namespace level below a prefix (namespace view).
+     * Groups one batch of keys by the next namespace level below a prefix (namespace view).
      *
-     * @param iterable<string, int> $keys Key => size in bytes, only keys inside the prefix.
+     * The namespace view scans the keys in batches over several requests, so the result has only sums: the browser
+     * adds up the batches, then sorts and pages the namespaces. The key names (shown on hover) are capped at 'nstitlekeys'.
+     *
+     * @param iterable<int|string, int> $keys Key => size in bytes, only keys inside the prefix.
      *
      * @return array{
-     *     namespaces: array<int, array{name: string, path: string, count: int, size: int, percentage: float, has_children: bool, direct_keys: int, direct_keys_names: array<int, string>}>,
-     *     direct_keys_count: int,
-     *     direct_keys_size: int,
-     *     direct_keys_percentage: float,
-     *     direct_keys_names: array<int, string>,
-     *     pagination: array{page: int, per_page: int, total: int, total_pages: int},
-     * }
+     *     direct: array{0: int, 1: int, 2: array<int, string>},
+     *     namespaces: array<int, array{0: string, 1: int, 2: int, 3: int, 4: int, 5: array<int, string>}>,
+     * } direct: [count, size, names]; namespaces: [name, count, size, has children (0/1), direct keys, direct key names]
      */
-    public static function namespaceStats(iterable $keys, string $prefix, string $separator, int $page = 1, int $per_page = 100): array {
+    public static function namespaceBatch(iterable $keys, string $prefix, string $separator): array {
         $title_keys = (int) Config::get('nstitlekeys', 25);
         $prefix_len = $prefix !== '' ? strlen($prefix.$separator) : 0;
-        $per_page = max(1, $per_page);
 
+        $direct = [0, 0, []];
         $namespaces = [];
-        $total_size = 0;
-        $direct_count = 0;
-        $direct_size = 0;
-        $direct_names = [];
 
         foreach ($keys as $key => $size) {
-            $key = (string) $key;
-            $total_size += $size;
-            $parts = explode($separator, substr($key, $prefix_len), 3);
+            $parts = explode($separator, substr((string) $key, $prefix_len), 3);
 
             // A key without a separator after the prefix is a direct key of this level.
             if (count($parts) === 1) {
-                $direct_count++;
-                $direct_size += $size;
+                $direct[0]++;
+                $direct[1] += $size;
 
-                if ($direct_count <= $title_keys) {
-                    $direct_names[] = $parts[0];
+                if (count($direct[2]) < $title_keys) {
+                    $direct[2][] = $parts[0];
                 }
 
                 continue;
             }
 
-            $path = $prefix !== '' ? $prefix.$separator.$parts[0] : $parts[0];
-
-            $namespaces[$path] ??= [
-                'name'              => $parts[0],
-                'path'              => $path,
-                'count'             => 0,
-                'size'              => 0,
-                'percentage'        => 0.0,
-                'has_children'      => false,
-                'direct_keys'       => 0,
-                'direct_keys_names' => [],
-            ];
-
-            $namespaces[$path]['count']++;
-            $namespaces[$path]['size'] += $size;
+            $name = $parts[0];
+            $namespaces[$name] ??= [$name, 0, 0, 0, 0, []];
+            $namespaces[$name][1]++;
+            $namespaces[$name][2] += $size;
 
             if (count($parts) > 2) {
-                $namespaces[$path]['has_children'] = true;
-            } elseif (++$namespaces[$path]['direct_keys'] <= $title_keys) {
-                $namespaces[$path]['direct_keys_names'][] = $parts[1];
+                $namespaces[$name][3] = 1;
+            } elseif (++$namespaces[$name][4] <= $title_keys) {
+                $namespaces[$name][5][] = $parts[1];
             }
         }
 
-        // The key names are only listed (in the title attribute) for small namespaces.
-        foreach ($namespaces as &$namespace) {
-            $namespace['percentage'] = $total_size > 0 ? round($namespace['size'] / $total_size * 100, 2) : 0.0;
-
-            if ($namespace['direct_keys'] > $title_keys) {
-                $namespace['direct_keys_names'] = [];
-            }
-        }
-
-        unset($namespace);
-
-        uasort($namespaces, static fn (array $a, array $b): int => $b['size'] <=> $a['size']);
-
-        $total = count($namespaces);
-        $total_pages = (int) ceil($total / $per_page);
-        $page = max(1, min($page, $total_pages));
-
-        return [
-            'namespaces'             => array_slice(array_values($namespaces), ($page - 1) * $per_page, $per_page),
-            'direct_keys_count'      => $direct_count,
-            'direct_keys_size'       => $direct_size,
-            'direct_keys_percentage' => $total_size > 0 ? round($direct_size / $total_size * 100, 2) : 0.0,
-            'direct_keys_names'      => $direct_count > $title_keys ? [] : $direct_names,
-            'pagination'             => [
-                'page'        => $page,
-                'per_page'    => $per_page,
-                'total'       => $total,
-                'total_pages' => $total_pages,
-            ],
-        ];
+        return ['direct' => $direct, 'namespaces' => array_values($namespaces)];
     }
 
     /**

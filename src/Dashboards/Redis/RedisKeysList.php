@@ -139,21 +139,32 @@ trait RedisKeysList {
     }
 
     /**
-     * All the keys that match a pattern, without the scan limit of the key list.
+     * The keys of one request of the namespace view (or of a namespace delete), from a cursor.
      *
-     * @return array<int, string>
+     * A small database is read with one KEYS call, like getAllKeys(). A big one is read with SCAN, 1000 keys per call,
+     * for at most ~0.5 s or 20 000 keys: Redis is never blocked for long and one request never holds all the keys.
+     * The browser sends the returned cursor back until it is '0'.
+     *
+     * @return array{0: string, 1: array<int, string>} [next cursor, keys]
      *
      * @throws Exception
      */
-    private function keysByPattern(string $pattern): array {
-        $scansize = Config::get('redisoptions.scansize');
+    private function keysStep(string $pattern, string $cursor): array {
         $scan_threshold = Config::get('redisoptions.scanthreshold', 100_000);
 
-        if ($scansize !== null || $this->redis->databaseSize() > $scan_threshold || !$this->isCommandSupported('KEYS')) {
-            return $this->redis->scanKeys($pattern, (int) ($scansize ?? 1000), PHP_INT_MAX);
+        if ($cursor === '0' && Config::get('redisoptions.scansize') === null && $this->redis->databaseSize() <= $scan_threshold && $this->isCommandSupported('KEYS')) {
+            return ['0', $this->redis->keys($pattern)];
         }
 
-        return $this->redis->keys($pattern);
+        $deadline = hrtime(true) + 500_000_000;
+        $keys = [];
+
+        do {
+            [$cursor, $batch] = $this->redis->scanStep($pattern, 1000, $cursor);
+            array_push($keys, ...$batch);
+        } while ($cursor !== '0' && count($keys) < 20_000 && hrtime(true) < $deadline);
+
+        return [$cursor, $keys];
     }
 
     /**
@@ -166,23 +177,18 @@ trait RedisKeysList {
     }
 
     /**
-     * Namespace view: keys grouped by the next level below the prefix, with their total size.
+     * One request of the namespace view: the keys from the cursor, grouped by the next level below the prefix.
      *
      * @return array<string, mixed>
      *
      * @throws Exception
      */
-    public function keysNamespaceView(string $prefix = ''): array {
+    public function keysNamespaceStep(string $prefix, string $cursor): array {
         $separator = $this->servers[$this->current_server]['separator'] ?? ':';
 
         // At the top level the search box filters the keys, inside a namespace the prefix does.
-        if ($prefix === '') {
-            $search = (string) Http::get('s', '', true);
-            $this->template->addGlobal('search_value', $search);
-            $keys = $this->keysByPattern($this->searchPattern($search));
-        } else {
-            $keys = $this->keysByPattern($this->namespacePattern($prefix));
-        }
+        $pattern = $prefix === '' ? $this->searchPattern((string) Http::get('s', '', true)) : $this->namespacePattern($prefix);
+        [$next, $keys] = $this->keysStep($pattern, $cursor);
 
         $sizes = [];
 
@@ -190,23 +196,26 @@ trait RedisKeysList {
             $sizes[$key] = (int) ($info['size'] ?? 0);
         }
 
-        return Helpers::namespaceStats($sizes, $prefix, $separator, Http::get('nspage', 1), Http::get('nspp', (int) Config::get('nsperpage', 100))) + [
-            'prefix'    => $prefix,
-            'separator' => $separator,
-        ];
+        return ['cursor' => $next, 'scanned' => count($keys)] + Helpers::namespaceBatch($sizes, $prefix, $separator);
     }
 
     /**
+     * One request of a namespace delete (UNLINK frees the memory in the background).
+     *
+     * @return array{cursor: string, deleted: int}
+     *
      * @throws Exception
      */
-    private function deleteNamespace(string $namespace): string {
+    private function deleteNamespaceStep(string $namespace, string $cursor): array {
+        [$next, $keys] = $this->keysStep($this->namespacePattern($namespace), $cursor);
         $deleted = 0;
 
-        foreach ($this->keysByPattern($this->namespacePattern($namespace)) as $key) {
-            $result = $this->redis->del($key);
+        // In a cluster the keys can be in different slots, so they are removed one by one.
+        foreach (array_chunk($keys, $this->is_cluster ? 1 : 1000) as $chunk) {
+            $result = $this->redis->unlink($chunk);
             $deleted += is_int($result) ? $result : 0;
         }
 
-        return Helpers::alert(sprintf('Deleted %d keys from namespace "%s".', $deleted, $namespace), 'success');
+        return ['cursor' => $next, 'deleted' => $deleted];
     }
 }

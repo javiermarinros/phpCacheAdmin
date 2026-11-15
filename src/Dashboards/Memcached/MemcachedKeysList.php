@@ -8,7 +8,6 @@ declare(strict_types=1);
 
 namespace RobiNN\Pca\Dashboards\Memcached;
 
-use RobiNN\Pca\Config;
 use RobiNN\Pca\Helpers;
 use RobiNN\Pca\Http;
 
@@ -141,28 +140,27 @@ trait MemcachedKeysList {
     }
 
     /**
-     * Namespace view: keys grouped by the next level below the prefix, with their total size.
+     * One request of the namespace view. Memcached has no cursor (all keys come from one metadump), so it is complete at once.
      *
      * @return array<string, mixed>
      *
      * @throws MemcachedException
      */
-    public function keysNamespaceView(string $prefix = ''): array {
+    public function keysNamespaceStep(string $prefix): array {
         $separator = $this->servers[$this->current_server]['separator'] ?? ':';
 
         // At the top level the search box filters the keys, inside a namespace the prefix does.
-        $raw_lines = $prefix === '' ? $this->getAllKeys() : $this->memcached->getKeys();
+        $keys = $this->namespaceKeys($prefix === '' ? $this->getAllKeys() : $this->memcached->getKeys(), $prefix);
 
-        return Helpers::namespaceStats($this->namespaceKeys($raw_lines, $prefix), $prefix, $separator, Http::get('nspage', 1), Http::get('nspp', (int) Config::get('nsperpage', 100))) + [
-            'prefix'    => $prefix,
-            'separator' => $separator,
-        ];
+        return ['cursor' => '0', 'scanned' => count($keys)] + Helpers::namespaceBatch($keys, $prefix, $separator);
     }
 
     /**
+     * @return array{cursor: string, deleted: int}
+     *
      * @throws MemcachedException
      */
-    private function deleteNamespace(string $namespace): string {
+    private function deleteNamespaceStep(string $namespace): array {
         $deleted = 0;
 
         foreach (array_keys($this->namespaceKeys($this->memcached->getKeys(), $namespace)) as $key) {
@@ -171,6 +169,6 @@ trait MemcachedKeysList {
             }
         }
 
-        return Helpers::alert(sprintf('Deleted %d keys from namespace "%s".', $deleted, $namespace), 'success');
+        return ['cursor' => '0', 'deleted' => $deleted];
     }
 }

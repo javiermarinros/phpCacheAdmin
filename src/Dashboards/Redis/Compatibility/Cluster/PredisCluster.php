@@ -160,6 +160,29 @@ class PredisCluster extends PredisClient implements RedisCompatibilityInterface 
         return $keys;
     }
 
+    /**
+     * The cursor is "node index:node cursor", the masters are scanned one after another.
+     *
+     * @return array{0: string, 1: array<int, string>}
+     */
+    public function scanStep(string $pattern, int $count, string $cursor): array {
+        $nodes = array_values($this->nodes);
+        [$index, $node_cursor] = str_contains($cursor, ':') ? explode(':', $cursor, 2) : [0, $cursor];
+        $index = (int) $index;
+
+        if (!isset($nodes[$index])) {
+            return ['0', []];
+        }
+
+        [$next, $keys] = $nodes[$index]->scan($node_cursor, ['MATCH' => $pattern, 'COUNT' => $count]);
+
+        if ((string) $next !== '0') {
+            return [$index.':'.$next, $keys];
+        }
+
+        return [isset($nodes[$index + 1]) ? ($index + 1).':0' : '0', $keys];
+    }
+
     public function listRem(string $key, string $value, int $count): int {
         return $this->lrem($key, $count, $value);
     }

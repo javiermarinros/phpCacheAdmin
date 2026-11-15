@@ -41,6 +41,15 @@ interface RedisCompatibilityInterface {
     public function scanKeys(string $pattern, int $count, ?int $limit = null): array;
 
     /**
+     * One SCAN call, for callers that keep the cursor between requests (e.g. the namespace view).
+     *
+     * @param string $cursor '0' to start; the returned cursor is '0' when the scan is complete.
+     *
+     * @return array{0: string, 1: array<int, string>} [next cursor, keys]
+     */
+    public function scanStep(string $pattern, int $count, string $cursor): array;
+
+    /**
      * Alias to a lRem().
      */
     public function listRem(string $key, string $value, int $count): int;

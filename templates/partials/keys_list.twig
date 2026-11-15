@@ -96,7 +96,7 @@
         {{ include('partials/table_view.twig') }}
     {% endif %}
 
-    <div id="table-no-keys" class="{{ keys|length > 0 or namespaces|default([])|length > 0 or direct_keys_count|default(0) > 0 ? 'hidden ' : '' }}p-4 border-b border-gray-200 dark:border-gray-700 text-center dark:text-gray-400">
+    <div id="table-no-keys" class="{{ keys|length > 0 or list_view == 'namespaces' ? 'hidden ' : '' }}p-4 border-b border-gray-200 dark:border-gray-700 text-center dark:text-gray-400">
         No keys.
     </div>
     <div class="py-4 px-6">{{ paginator|raw }}</div>

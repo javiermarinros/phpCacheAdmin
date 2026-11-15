@@ -162,10 +162,14 @@ trait RedisTrait {
         Helpers::importResultAlert();
 
         if (Http::get('view', Config::get('listview', 'table')) === 'namespaces' && !isset($_GET['export_btn'])) {
-            return $this->keysNamespaceView() + [
+            // The browser loads the namespaces in batches (keysNamespaceStep()), the page itself does not scan.
+            $this->template->addGlobal('search_value', (string) Http::get('s', '', true));
+
+            return [
                 'keys'      => [],
                 'all_keys'  => $this->redis->databaseSize(),
                 'paginator' => '',
+                'separator' => $this->servers[$this->current_server]['separator'] ?? ':',
             ];
         }
 

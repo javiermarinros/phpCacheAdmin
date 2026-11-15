@@ -1616,14 +1616,23 @@ const init_ttl_countdown = () => {
 };
 
 /**
- * Namespace view: the levels below the top one are rendered by the server and loaded on demand.
+ * Namespace view: each level is scanned in batches (one request reads ~0.5 s of keys and returns their sums per namespace).
+ * The batches are added up here, then the level is sorted by size, paged and drawn with the <template> rows of the page.
  */
 class NamespaceView {
     constructor(element) {
         this.element = element;
+        this.separator = element.dataset.separator;
+        this.per_page = parseInt(element.dataset.perPage, 10) || 100;
+        this.title_keys = parseInt(element.dataset.titleKeys, 10) || 0;
+        this.total = element.dataset.total === '' ? null : parseInt(element.dataset.total, 10);
         this.expanded = false;
+        this.levels = new WeakMap();
+        // Scans run one after another, so "Expand all" does not start many scans of the database at once.
+        this.queue = Promise.resolve();
 
         element.addEventListener('click', e => this.#handle_click(e));
+        this.#load(element.querySelector('.namespace-children-content'));
     }
 
     #handle_click(e) {
@@ -1635,7 +1644,9 @@ class NamespaceView {
 
         const page = e.target.closest('.ns-page');
         if (page) {
-            this.#load(page.closest('.namespace-children-content'), parseInt(page.dataset.page, 10));
+            const content = page.closest('.namespace-children-content');
+            this.levels.get(content).page = parseInt(page.dataset.page, 10);
+            this.#render(content);
             return;
         }
 
@@ -1651,6 +1662,16 @@ class NamespaceView {
         }
     }
 
+    #clone(id) {
+        return document.getElementById(id).content.firstElementChild.cloneNode(true);
+    }
+
+    #message(id, text) {
+        const element = this.#clone(id);
+        element.textContent = text;
+        return element;
+    }
+
     #toggle(item, show = null) {
         const children = item.querySelector(':scope > .namespace-children');
         const will_show = show ?? children.classList.contains('hidden');
@@ -1659,8 +1680,8 @@ class NamespaceView {
         item.querySelector(':scope > div > .namespace-toggle svg').classList.toggle('-rotate-90', !will_show);
 
         const content = children.querySelector(':scope > .namespace-children-content');
-        if (will_show && !content.dataset.loaded) {
-            this.#load(content, 1);
+        if (will_show && !this.levels.has(content)) {
+            this.#load(content);
         }
     }
 
@@ -1672,33 +1693,213 @@ class NamespaceView {
         this.element.querySelectorAll('.namespace-item[data-has-children="1"]').forEach(item => this.#toggle(item, this.expanded));
     }
 
-    #load(content, page) {
-        content.dataset.loaded = '1';
-        content.innerHTML = '<div class="py-4 px-6 text-center text-gray-600 dark:text-gray-300">Loading...</div>';
+    #load(content) {
+        const level = {prefix: content.dataset.namespace, cursor: '0', scanned: 0, direct: [0, 0, []], namespaces: new Map(), list: null, page: 1};
 
-        ajax(`namespaces=${encodeURIComponent(content.dataset.namespace)}&nspage=${page}`, (request) => {
-            if (ajax_ok(request)) {
-                content.innerHTML = request.response;
-            } else {
-                content.innerHTML = '<div class="py-4 px-6 text-center text-red-500">Failed to load the namespaces.</div>';
-                delete content.dataset.loaded;
-            }
-        });
+        this.levels.set(content, level);
+        content.replaceChildren(this.#message('ns-progress', 'Waiting...'));
+        this.queue = this.queue.then(() => this.#scan(content, level));
     }
 
-    #delete(item) {
+    async #scan(content, level) {
+        // The total is known only for the whole database (top level without a search).
+        const total = level.prefix === '' && this.total !== null ? ` of ${number_format(this.total)}` : '';
+
+        do {
+            content.replaceChildren(this.#message('ns-progress', `Scanning... ${number_format(level.scanned)}${total} keys`));
+
+            const query = `namespaces=${encodeURIComponent(level.prefix)}&nscursor=${encodeURIComponent(level.cursor)}`;
+            const request = await new Promise(resolve => ajax(query, resolve));
+            const data = ajax_ok(request) ? parse_json(request) : null;
+
+            if (!data) {
+                // An error comes back as an alert (HTML built by the server), or as nothing.
+                const error = this.#message('ns-error', request.response ? '' : 'Failed to load the namespaces.');
+                error.innerHTML = request.response || error.textContent;
+                content.replaceChildren(error);
+                this.levels.delete(content);
+                return;
+            }
+
+            this.#merge(level, data);
+        } while (level.cursor !== '0');
+
+        level.list = [...level.namespaces.values()].sort((a, b) => b[2] - a[2]);
+        level.namespaces = null;
+        this.#render(content);
+    }
+
+    // Adds one batch: direct = [count, size, names], namespace = [name, count, size, has children, direct keys, names].
+    #merge(level, data) {
+        level.cursor = data.cursor;
+        level.scanned += data.scanned;
+
+        const [count, size, names] = data.direct;
+        level.direct[0] += count;
+        level.direct[1] += size;
+        level.direct[2].push(...names.slice(0, this.title_keys - level.direct[2].length));
+
+        for (const [name, ns_count, ns_size, has_children, direct_keys, ns_names] of data.namespaces) {
+            const namespace = level.namespaces.get(name) ?? [name, 0, 0, 0, 0, []];
+
+            namespace[1] += ns_count;
+            namespace[2] += ns_size;
+            namespace[3] = namespace[3] || has_children;
+            namespace[4] += direct_keys;
+            namespace[5].push(...ns_names.slice(0, this.title_keys - namespace[5].length));
+            level.namespaces.set(name, namespace);
+        }
+    }
+
+    // Key names are listed on hover only when all of them fit ('nstitlekeys').
+    #names_title(element, count, names) {
+        if (count > 0 && count <= this.title_keys && names.length) {
+            element.title = names.join(', ');
+        }
+    }
+
+    #size_bar(row, size, total_size) {
+        const percentage = total_size > 0 ? size / total_size * 100 : 0;
+
+        row.querySelector('.ns-bar').style.width = `${percentage}%`;
+        row.querySelector('.ns-percent').textContent = `${number_format(percentage, 1)}%`;
+    }
+
+    #render(content) {
+        const level = this.levels.get(content);
+        const [direct_count, direct_size, direct_names] = level.direct;
+        const total_size = level.list.reduce((sum, namespace) => sum + namespace[2], direct_size);
+        const pages = Math.max(1, Math.ceil(level.list.length / this.per_page));
+        const nodes = [];
+
+        level.page = Math.min(Math.max(1, level.page), pages);
+
+        if (direct_count > 0) {
+            const row = this.#clone('ns-direct');
+            const label = row.querySelector('.ns-name');
+
+            label.textContent = `${number_format(direct_count)} direct key${direct_count > 1 ? 's' : ''}${level.prefix === '' ? ' (not in any namespace)' : ''}`;
+            this.#names_title(label, direct_count, direct_names);
+            row.querySelector('.ns-size').textContent = format_bytes(direct_size);
+            this.#size_bar(row, direct_size, total_size);
+            nodes.push(row);
+        }
+
+        const pager = pages > 1 ? this.#pager(level, pages) : null;
+
+        if (pager) {
+            nodes.push(pager);
+        }
+
+        for (const namespace of level.list.slice((level.page - 1) * this.per_page, level.page * this.per_page)) {
+            nodes.push(this.#item(level, namespace, total_size));
+        }
+
+        if (pager) {
+            nodes.push(pager.cloneNode(true));
+        }
+
+        if (!level.list.length && !direct_count) {
+            if (level.prefix === '') {
+                document.getElementById('table-no-keys')?.classList.remove('hidden');
+            } else {
+                nodes.push(this.#clone('ns-empty'));
+            }
+        }
+
+        content.replaceChildren(...nodes);
+    }
+
+    #item(level, [name, count, size, has_children, direct_keys, names], total_size) {
+        const item = this.#clone('ns-item');
+        const path = level.prefix === '' ? name : `${level.prefix}${this.separator}${name}`;
+        const label = item.querySelector('.ns-name');
+        const filter = new URL(this.element.dataset.filterUrl, location.href);
+
+        item.dataset.namespace = path;
+        item.dataset.hasChildren = has_children ? '1' : '0';
+        label.textContent = `${name}${this.separator}*`;
+        this.#names_title(label, direct_keys, names);
+        item.querySelector('.ns-count').textContent = `${number_format(count)} key${count > 1 ? 's' : ''}`;
+        item.querySelector('.ns-size').textContent = format_bytes(size);
+        this.#size_bar(item, size, total_size);
+
+        filter.searchParams.set('s', `${path}${this.separator}*`);
+        item.querySelector('.ns-filter').href = filter.href;
+        item.querySelector('.namespace-children-content').dataset.namespace = path;
+
+        if (!has_children) {
+            item.querySelector('.namespace-toggle').style.visibility = 'hidden';
+        }
+
+        return item;
+    }
+
+    #pager(level, pages) {
+        const pager = this.#clone('ns-pager');
+        const container = pager.querySelector('.ns-pages');
+        const total = level.list.length;
+        const first = (level.page - 1) * this.per_page + 1;
+        const button = (page, text, disabled = false) => {
+            const element = this.#clone(page === level.page && text === String(page) ? 'ns-page-active' : 'ns-page');
+            element.dataset.page = String(page);
+            element.textContent = text;
+            element.disabled = disabled;
+            return element;
+        };
+
+        pager.querySelector('.ns-pager-text').textContent = `Showing ${number_format(first)} - ${number_format(Math.min(level.page * this.per_page, total))} of ${number_format(total)} namespaces`;
+        container.append(button(level.page - 1, '«', level.page <= 1));
+
+        for (let page = 1; page <= pages; page++) {
+            if (page === 1 || page === pages || Math.abs(page - level.page) <= 2) {
+                container.append(button(page, String(page)));
+            } else if (Math.abs(page - level.page) === 3) {
+                container.append(this.#clone('ns-gap'));
+            }
+        }
+
+        container.append(button(level.page + 1, '»', level.page >= pages));
+
+        return pager;
+    }
+
+    // Deletes in batches, like the scan, and removes the namespace from its level when done.
+    async #delete(item) {
         const namespace = item.dataset.namespace;
 
         if (!window.confirm(`Are you sure you want to remove all keys in the namespace "${namespace}"?`)) {
             return;
         }
 
-        ajax('deletenamespace', (request) => {
-            if (ajax_ok(request)) {
+        const content = item.closest('.namespace-children-content');
+        let cursor = '0';
+        let deleted = 0;
+
+        item.style.opacity = '0.5';
+
+        do {
+            const request = await new Promise(resolve => ajax('deletenamespace', resolve, {deletenamespace: namespace, cursor, deleted}, false));
+            const data = ajax_ok(request) ? parse_json(request) : null;
+
+            if (!data) {
                 set_alerts(request.response);
-                item.remove();
+                item.style.opacity = '';
+                return;
             }
-        }, namespace);
+
+            ({cursor, deleted} = data);
+
+            if (data.alert) {
+                set_alerts(data.alert);
+            }
+        } while (cursor !== '0');
+
+        const level = this.levels.get(content);
+        const name = namespace.slice(level.prefix === '' ? 0 : level.prefix.length + this.separator.length);
+
+        level.list = level.list.filter(entry => entry[0] !== name);
+        this.#render(content);
     }
 }
 

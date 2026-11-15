@@ -150,6 +150,18 @@ class Redis extends \Redis implements RedisCompatibilityInterface {
     }
 
     /**
+     * @return array{0: string, 1: array<int, string>}
+     *
+     * @throws RedisException
+     */
+    public function scanStep(string $pattern, int $count, string $cursor): array {
+        $iterator = $cursor === '0' ? null : (int) $cursor;
+        $keys = $this->scan($iterator, $pattern, $count);
+
+        return [(string) ($iterator ?? 0), is_array($keys) ? $keys : []];
+    }
+
+    /**
      * @throws RedisException
      */
     public function listRem(string $key, string $value, int $count): int {

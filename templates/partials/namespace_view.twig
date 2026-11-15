@@ -1,10 +1,92 @@
-<div class="namespaceview">
+{#
+ # Namespace view. The browser scans the keys in batches (?ajax&namespaces=prefix&nscursor=...), adds the batches up,
+ # then sorts, pages and draws each level with the <template> rows below. So the page never scans and a big database
+ # is never read in one request.
+ #}
+{% set show_actions = not readonly %}
+{% set row = 'flex gap-2 items-center py-2 px-6 text-sm border-t border-gray-200 dark:border-gray-700' %}
+{% set size_bar %}
+    <div class="hidden md:flex items-center gap-2 w-28 shrink-0">
+        <div class="flex-1 h-2 bg-gray-200 rounded-sm dark:bg-gray-700 overflow-hidden">
+            <div class="ns-bar h-full bg-primary-500 rounded-sm"></div>
+        </div>
+        <span class="ns-percent w-12 text-xs text-right text-gray-600 dark:text-gray-300"></span>
+    </div>
+{% endset %}
+
+<div class="namespaceview" data-separator="{{ separator }}" data-per-page="{{ config('nsperpage', 100) }}" data-title-keys="{{ config('nstitlekeys', 25) }}"
+     data-total="{{ search_value is empty ? all_keys : '' }}" data-filter-url="{{ link([], {view: 'table'}) }}">
     <div class="flex gap-2 py-2 px-6 border-t border-gray-200 dark:border-gray-700">
         <button type="button" class="py-1 px-2 text-xs text-gray-900 bg-gray-100 rounded dark:text-gray-100 dark:bg-gray-900 hover:bg-gray-300 expand-all-namespaces dark:hover:bg-gray-700">
             Expand all
         </button>
     </div>
-    <div class="namespace-children-content" data-namespace="">
-        {{ include('partials/namespace_items.twig') }}
-    </div>
+    <div class="namespace-children-content" data-namespace=""></div>
+
+    <template id="ns-progress">
+        <div class="{{ row }} justify-center text-gray-600 dark:text-gray-300"></div>
+    </template>
+
+    <template id="ns-error">
+        <div class="{{ row }} justify-center text-red-500"></div>
+    </template>
+
+    <template id="ns-empty">
+        <div class="{{ row }} justify-center text-gray-600 dark:text-gray-300">No namespaces.</div>
+    </template>
+
+    <template id="ns-direct">
+        <div class="{{ row }} bg-gray-50 dark:bg-gray-800/50">
+            <span class="ns-name flex-1 min-w-0 text-gray-600 dark:text-gray-300"></span>
+            <span class="ns-size w-20 md:w-24 shrink-0 text-right" title="Total size"></span>
+            {{ size_bar }}
+            {% if show_actions %}
+                <span class="w-10 md:w-36 shrink-0"></span>
+            {% endif %}
+        </div>
+    </template>
+
+    <template id="ns-item">
+        <div class="namespace-item border-t border-gray-200 dark:border-gray-700">
+            <div class="flex gap-2 items-center py-2 px-6 text-sm hover:bg-gray-50 dark:hover:bg-white/5">
+                <button type="button" class="flex shrink-0 items-center namespace-toggle" aria-label="Expand">
+                    {{ svg('down', 10, '-rotate-90 transition-transform') }}
+                </button>
+                <span class="ns-name flex-1 min-w-0 font-semibold truncate text-primary-500 dark:text-primary-400"></span>
+                <span class="ns-count hidden md:inline w-24 shrink-0 text-right" title="Keys count"></span>
+                <span class="ns-size w-20 md:w-24 shrink-0 text-right" title="Total size"></span>
+                {{ size_bar }}
+                <a class="ns-filter inline-flex shrink-0 gap-1 items-center font-semibold text-primary-500 hover:text-primary-700" title="Filter keys in this namespace">
+                    {{ svg('search', 16) }} <span class="hidden md:inline">Filter</span>
+                </a>
+                {% if show_actions %}
+                    <button type="button" class="inline-flex shrink-0 gap-1 items-center font-semibold text-red-500 hover:text-red-700 delete-namespace" title="Delete all keys in this namespace">
+                        {{ svg('trash', 16) }} <span class="hidden md:inline">Delete</span>
+                    </button>
+                {% endif %}
+            </div>
+            <div class="hidden pl-6 namespace-children">
+                <div class="namespace-children-content"></div>
+            </div>
+        </div>
+    </template>
+
+    <template id="ns-pager">
+        <div class="flex flex-wrap gap-2 justify-between items-center py-2 px-6 border-t border-gray-200 dark:border-gray-700 bg-gray-100 dark:bg-gray-800">
+            <span class="ns-pager-text text-xs text-gray-600 dark:text-gray-300"></span>
+            <div class="ns-pages flex gap-1 items-center"></div>
+        </div>
+    </template>
+
+    <template id="ns-page">
+        <button type="button" class="ns-page py-1 px-2 text-xs rounded-sm bg-white dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"></button>
+    </template>
+
+    <template id="ns-page-active">
+        <button type="button" class="ns-page py-1 px-2 text-xs rounded-sm bg-primary-500 text-white" aria-current="page"></button>
+    </template>
+
+    <template id="ns-gap">
+        <span class="px-1 text-gray-400">...</span>
+    </template>
 </div>

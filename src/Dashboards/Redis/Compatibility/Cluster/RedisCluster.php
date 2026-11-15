@@ -147,6 +147,33 @@ class RedisCluster extends \RedisCluster implements RedisCompatibilityInterface 
     }
 
     /**
+     * The cursor is "node index:node cursor", the masters are scanned one after another.
+     *
+     * @return array{0: string, 1: array<int, string>}
+     *
+     * @throws RedisClusterException
+     */
+    public function scanStep(string $pattern, int $count, string $cursor): array {
+        $nodes = array_values($this->nodes);
+        [$index, $node_cursor] = str_contains($cursor, ':') ? explode(':', $cursor, 2) : [0, $cursor];
+        $index = (int) $index;
+
+        if (!isset($nodes[$index])) {
+            return ['0', []];
+        }
+
+        $iterator = $node_cursor === '0' ? null : (int) $node_cursor;
+        $keys = $this->scan($iterator, $nodes[$index], $pattern, $count);
+        $keys = is_array($keys) ? $keys : [];
+
+        if ((int) ($iterator ?? 0) !== 0) {
+            return [$index.':'.$iterator, $keys];
+        }
+
+        return [isset($nodes[$index + 1]) ? ($index + 1).':0' : '0', $keys];
+    }
+
+    /**
      * @throws RedisClusterException
      */
     public function listRem(string $key, string $value, int $count): int {

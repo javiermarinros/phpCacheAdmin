@@ -168,7 +168,11 @@ class RedisDashboard implements DashboardInterface {
             }
 
             if (isset($_GET['namespaces'])) {
-                return $this->template->render('partials/namespace_items', $this->keysNamespaceView((string) Http::get('namespaces', '', true)));
+                if (!headers_sent()) {
+                    header('Content-Type: application/json');
+                }
+
+                return Helpers::ajaxJson($this->keysNamespaceStep((string) Http::get('namespaces', '', true), (string) Http::get('nscursor', '0', true)));
             }
 
             if (isset($_GET['deletenamespace'])) {
@@ -176,9 +180,7 @@ class RedisDashboard implements DashboardInterface {
                     return Helpers::alert('Invalid CSRF token.', 'error');
                 }
 
-                $namespace = Helpers::namespaceFromPost();
-
-                return $namespace !== '' ? $this->deleteNamespace($namespace) : Helpers::alert('No namespace is selected.');
+                return Helpers::deleteNamespaceAjax(fn (string $namespace, string $cursor): array => $this->deleteNamespaceStep($namespace, $cursor));
             }
 
             if (isset($_GET['deleteall'])) {

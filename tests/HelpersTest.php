@@ -340,62 +340,56 @@ final class HelpersTest extends TestCase {
         yield 'multiline key' => [true, "user:1\n2", 'user:*'];
     }
 
-    public function testNamespaceStats(): void {
+    public function testNamespaceBatch(): void {
         $keys = [
             'user:1'          => 100,
             'user:2'          => 100,
             'user:1:settings' => 200,
             'league:5'        => 50,
             'solo'            => 50,
+            '7'               => 10, // Numeric keys become int array keys.
         ];
 
-        $stats = Helpers::namespaceStats($keys, '', ':');
+        $batch = Helpers::namespaceBatch($keys, '', ':');
 
-        $this->assertSame(1, $stats['direct_keys_count']);
-        $this->assertSame(50, $stats['direct_keys_size']);
-        $this->assertSame(10.0, $stats['direct_keys_percentage']);
-        $this->assertSame(['solo'], $stats['direct_keys_names']);
-        $this->assertSame(['page' => 1, 'per_page' => 100, 'total' => 2, 'total_pages' => 1], $stats['pagination']);
-
-        // Sorted by size, biggest first.
-        [$user, $league] = $stats['namespaces'];
-        $this->assertSame(['user', 'user', 3, 400, 80.0, true, 2, ['1', '2']], [
-            $user['name'], $user['path'], $user['count'], $user['size'], $user['percentage'], $user['has_children'], $user['direct_keys'], $user['direct_keys_names'],
-        ]);
-        $this->assertSame(['league', false, 1], [$league['path'], $league['has_children'], $league['direct_keys']]);
+        $this->assertSame([2, 60, ['solo', '7']], $batch['direct']);
+        $this->assertSame([
+            ['user', 3, 400, 1, 2, ['1', '2']],
+            ['league', 1, 50, 0, 1, ['5']],
+        ], $batch['namespaces']);
     }
 
-    public function testNamespaceStatsWithPrefix(): void {
+    public function testNamespaceBatchWithPrefix(): void {
         $keys = [
             'user:1'          => 100,
             'user:1:settings' => 200,
             'user:1:a:b'      => 10,
         ];
 
-        $stats = Helpers::namespaceStats($keys, 'user', ':');
+        $batch = Helpers::namespaceBatch($keys, 'user', ':');
 
-        $this->assertSame(1, $stats['direct_keys_count']);
-        $this->assertSame(['1'], $stats['direct_keys_names']);
-        $this->assertCount(1, $stats['namespaces']);
-        $this->assertSame('user:1', $stats['namespaces'][0]['path']);
-        $this->assertSame(2, $stats['namespaces'][0]['count']);
-        $this->assertTrue($stats['namespaces'][0]['has_children']);
+        $this->assertSame([1, 100, ['1']], $batch['direct']);
+        $this->assertSame([['1', 2, 210, 1, 1, ['settings']]], $batch['namespaces']);
     }
 
-    public function testNamespaceStatsPagination(): void {
+    public function testNamespaceBatchCapsTheKeyNames(): void {
         $keys = [];
 
-        for ($i = 0; $i < 5; $i++) {
-            $keys['ns'.$i.':key'] = 10 * ($i + 1);
+        for ($i = 0; $i < 30; $i++) {
+            $keys['ns:'.$i] = 1;
+            $keys['direct'.$i] = 1;
         }
 
-        $stats = Helpers::namespaceStats($keys, '', ':', 3, 2);
+        $batch = Helpers::namespaceBatch($keys, '', ':');
 
-        $this->assertSame(['page' => 3, 'per_page' => 2, 'total' => 5, 'total_pages' => 3], $stats['pagination']);
-        $this->assertSame(['ns0'], array_column($stats['namespaces'], 'path'));
+        // The counts are exact, only the names shown on hover are capped at 'nstitlekeys' (25).
+        $this->assertSame(30, $batch['direct'][0]);
+        $this->assertCount(25, $batch['direct'][2]);
+        $this->assertSame(30, $batch['namespaces'][0][4]);
+        $this->assertCount(25, $batch['namespaces'][0][5]);
+    }
 
-        // A page out of range falls back to the last one.
-        $this->assertSame(3, Helpers::namespaceStats($keys, '', ':', 99, 2)['pagination']['page']);
-        $this->assertSame(1, Helpers::namespaceStats([], '', ':', 5, 2)['pagination']['page']);
+    public function testNamespaceBatchEmpty(): void {
+        $this->assertSame(['direct' => [0, 0, []], 'namespaces' => []], Helpers::namespaceBatch([], 'x', ':'));
     }
 }
