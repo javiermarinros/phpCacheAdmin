@@ -559,19 +559,24 @@ class Helpers {
      * The namespace view scans the keys in batches over several requests, so the result has only sums: the browser
      * adds up the batches, then sorts and pages the namespaces. The key names (shown on hover) are capped at 'nstitlekeys'.
      *
-     * @param iterable<int|string, int> $keys Key => size in bytes, only keys inside the prefix.
+     * @param iterable<int|string, int> $keys        Key => size in bytes, only keys inside the prefix.
+     * @param bool                      $direct_keys Also list every direct key of the level (the browser asks for them
+     *                                               only when the direct keys row is opened).
      *
      * @return array{
      *     direct: array{0: int, 1: int, 2: array<int, string>},
      *     namespaces: array<int, array{0: string, 1: int, 2: int, 3: int, 4: int, 5: array<int, string>}>,
-     * } direct: [count, size, names]; namespaces: [name, count, size, has children (0/1), direct keys, direct key names]
+     *     keys?: array<int, array{0: string, 1: int}>,
+     * } direct: [count, size, names]; namespaces: [name, count, size, has children (0/1), direct keys, direct key names];
+     *   keys: [name, size] of the direct keys
      */
-    public static function namespaceBatch(iterable $keys, string $prefix, string $separator): array {
+    public static function namespaceBatch(iterable $keys, string $prefix, string $separator, bool $direct_keys = false): array {
         $title_keys = (int) Config::get('nstitlekeys', 25);
         $prefix_len = $prefix !== '' ? strlen($prefix.$separator) : 0;
 
         $direct = [0, 0, []];
         $namespaces = [];
+        $list = [];
 
         foreach ($keys as $key => $size) {
             $parts = explode($separator, substr((string) $key, $prefix_len), 3);
@@ -583,6 +588,10 @@ class Helpers {
 
                 if (count($direct[2]) < $title_keys) {
                     $direct[2][] = $parts[0];
+                }
+
+                if ($direct_keys) {
+                    $list[] = [$parts[0], $size];
                 }
 
                 continue;
@@ -600,7 +609,7 @@ class Helpers {
             }
         }
 
-        return ['direct' => $direct, 'namespaces' => array_values($namespaces)];
+        return ['direct' => $direct, 'namespaces' => array_values($namespaces)] + ($direct_keys ? ['keys' => $list] : []);
     }
 
     /**

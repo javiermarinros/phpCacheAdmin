@@ -152,7 +152,7 @@ trait MemcachedKeysList {
         // The search box filters every level, so the levels add up to the top level.
         $keys = $this->namespaceKeys($this->getAllKeys(), $prefix);
 
-        return ['cursor' => '0', 'scanned' => count($keys)] + Helpers::namespaceBatch($keys, $prefix, $separator);
+        return ['cursor' => '0', 'scanned' => count($keys)] + Helpers::namespaceBatch($keys, $prefix, $separator, Http::get('nsdirect', 0) === 1);
     }
 
     /**

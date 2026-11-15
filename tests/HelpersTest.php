@@ -359,6 +359,19 @@ final class HelpersTest extends TestCase {
         ], $batch['namespaces']);
     }
 
+    public function testNamespaceBatchDirectKeys(): void {
+        $keys = [
+            'user:1'          => 100,
+            'user:1:settings' => 200,
+            'solo'            => 50,
+            '7'               => 10,
+        ];
+
+        $this->assertArrayNotHasKey('keys', Helpers::namespaceBatch($keys, '', ':'));
+        $this->assertSame([['solo', 50], ['7', 10]], Helpers::namespaceBatch($keys, '', ':', true)['keys']);
+        $this->assertSame([['1', 100]], Helpers::namespaceBatch(['user:1' => 100, 'user:1:settings' => 200], 'user', ':', true)['keys']);
+    }
+
     public function testNamespaceBatchWithPrefix(): void {
         $keys = [
             'user:1'          => 100,

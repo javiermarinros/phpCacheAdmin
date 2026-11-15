@@ -1639,15 +1639,16 @@ class NamespaceView {
     #handle_click(e) {
         const toggle = e.target.closest('.namespace-toggle');
         if (toggle) {
-            this.#toggle(toggle.closest('.namespace-item'));
+            this.#toggle(toggle.closest('.namespace-item, .namespace-direct'));
             return;
         }
 
         const page = e.target.closest('.ns-page');
         if (page) {
             const content = page.closest('.namespace-children-content');
-            this.levels.get(content).page = parseInt(page.dataset.page, 10);
-            this.#render(content);
+            const level = this.levels.get(content);
+            level.page = parseInt(page.dataset.page, 10);
+            level.keys ? this.#render_keys(content) : this.#render(content);
             return;
         }
 
@@ -1695,7 +1696,8 @@ class NamespaceView {
     }
 
     #load(content) {
-        const level = {prefix: content.dataset.namespace, cursor: '0', scanned: 0, direct: [0, 0, []], namespaces: new Map(), list: null, page: 1};
+        // A direct keys list (data-direct) scans the same prefix, but keeps the [name, size] of each direct key.
+        const level = {prefix: content.dataset.namespace, keys: content.dataset.direct === '1' ? [] : null, cursor: '0', scanned: 0, direct: [0, 0, []], namespaces: new Map(), list: null, page: 1};
 
         this.levels.set(content, level);
         content.replaceChildren(this.#message('ns-progress', 'Waiting...'));
@@ -1709,7 +1711,7 @@ class NamespaceView {
         do {
             content.replaceChildren(this.#message('ns-progress', `Scanning... ${number_format(level.scanned)}${total} keys`));
 
-            const query = `namespaces=${encodeURIComponent(level.prefix)}&nscursor=${encodeURIComponent(level.cursor)}`;
+            const query = `namespaces=${encodeURIComponent(level.prefix)}&nscursor=${encodeURIComponent(level.cursor)}${level.keys ? '&nsdirect=1' : ''}`;
             const request = await new Promise(resolve => ajax(query, resolve));
             const data = ajax_ok(request) ? parse_json(request) : null;
 
@@ -1725,15 +1727,20 @@ class NamespaceView {
             this.#merge(level, data);
         } while (level.cursor !== '0');
 
-        level.list = [...level.namespaces.values()].sort((a, b) => b[2] - a[2]);
+        level.list = level.keys ? level.keys.sort((a, b) => b[1] - a[1]) : [...level.namespaces.values()].sort((a, b) => b[2] - a[2]);
         level.namespaces = null;
-        this.#render(content);
+        level.keys ? this.#render_keys(content) : this.#render(content);
     }
 
     // Adds one batch: direct = [count, size, names], namespace = [name, count, size, has children, direct keys, names].
     #merge(level, data) {
         level.cursor = data.cursor;
         level.scanned += data.scanned;
+
+        if (level.keys) {
+            level.keys.push(...data.keys);
+            return;
+        }
 
         const [count, size, names] = data.direct;
         level.direct[0] += count;
@@ -1783,6 +1790,7 @@ class NamespaceView {
             this.#names_title(label, direct_count, direct_names);
             row.querySelector('.ns-size').textContent = format_bytes(direct_size);
             this.#size_bar(row, direct_size, total_size);
+            row.querySelector('.namespace-children-content').dataset.namespace = level.prefix;
             nodes.push(row);
         }
 
@@ -1809,6 +1817,41 @@ class NamespaceView {
         }
 
         content.replaceChildren(...nodes);
+    }
+
+    // The direct keys of a level, biggest first, each one a link to its key page.
+    #render_keys(content) {
+        const level = this.levels.get(content);
+        const total_size = level.list.reduce((sum, key) => sum + key[1], 0);
+        const pages = Math.max(1, Math.ceil(level.list.length / this.per_page));
+        const nodes = [];
+
+        level.page = Math.min(Math.max(1, level.page), pages);
+
+        const pager = pages > 1 ? this.#pager(level, pages) : null;
+
+        for (const [name, size] of level.list.slice((level.page - 1) * this.per_page, level.page * this.per_page)) {
+            const row = this.#clone('ns-key');
+            const link = row.querySelector('.ns-key');
+            const url = new URL(this.element.dataset.filterUrl, location.href);
+            const key = level.prefix === '' ? name : `${level.prefix}${this.separator}${name}`;
+
+            url.searchParams.set('view', 'key');
+            url.searchParams.set('key', key);
+            link.href = url.href;
+            link.textContent = key;
+            link.title = key;
+            row.querySelector('.ns-size').textContent = format_bytes(size);
+            this.#size_bar(row, size, total_size);
+            nodes.push(row);
+        }
+
+        if (pager) {
+            nodes.unshift(pager);
+            nodes.push(pager.cloneNode(true));
+        }
+
+        content.replaceChildren(...(nodes.length ? nodes : [this.#clone('ns-empty')]));
     }
 
     #item(level, [name, count, size, has_children, direct_keys, names], total_size) {
@@ -1849,7 +1892,7 @@ class NamespaceView {
             return element;
         };
 
-        pager.querySelector('.ns-pager-text').textContent = `Showing ${number_format(first)} - ${number_format(Math.min(level.page * this.per_page, total))} of ${number_format(total)} namespaces`;
+        pager.querySelector('.ns-pager-text').textContent = `Showing ${number_format(first)} - ${number_format(Math.min(level.page * this.per_page, total))} of ${number_format(total)} ${level.keys ? 'keys' : 'namespaces'}`;
         container.append(button(level.page - 1, '«', level.page <= 1));
 
         for (let page = 1; page <= pages; page++) {

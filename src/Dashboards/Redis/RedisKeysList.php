@@ -203,7 +203,7 @@ trait RedisKeysList {
             $sizes[$key] = (int) ($info['size'] ?? 0);
         }
 
-        return ['cursor' => $next, 'scanned' => $scanned] + Helpers::namespaceBatch($sizes, $prefix, $separator);
+        return ['cursor' => $next, 'scanned' => $scanned] + Helpers::namespaceBatch($sizes, $prefix, $separator, Http::get('nsdirect', 0) === 1);
     }
 
     /**

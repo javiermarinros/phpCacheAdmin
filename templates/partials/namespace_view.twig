@@ -35,10 +35,30 @@
         <div class="{{ row }} justify-center text-gray-600 dark:text-gray-300">No namespaces.</div>
     </template>
 
+    {# The direct keys of a level open like a namespace, as a paged list of links to the keys. #}
     <template id="ns-direct">
-        <div class="{{ row }} bg-gray-50 dark:bg-gray-800/50">
-            <span class="ns-name flex-1 min-w-0 text-gray-600 dark:text-gray-300"></span>
-            <span class="ns-size w-20 md:w-24 shrink-0 text-right" title="Total size"></span>
+        <div class="namespace-direct border-t border-gray-200 dark:border-gray-700">
+            <div class="flex gap-2 items-center py-2 px-6 text-sm bg-gray-50 dark:bg-gray-800/50">
+                <button type="button" class="flex shrink-0 items-center namespace-toggle" aria-label="Show the keys">
+                    {{ svg('down', 10, '-rotate-90 transition-transform') }}
+                </button>
+                <span class="ns-name flex-1 min-w-0 text-gray-600 dark:text-gray-300"></span>
+                <span class="ns-size w-20 md:w-24 shrink-0 text-right" title="Total size"></span>
+                {{ size_bar }}
+                {% if show_actions %}
+                    <span class="w-10 md:w-36 shrink-0"></span>
+                {% endif %}
+            </div>
+            <div class="hidden pl-6 namespace-children">
+                <div class="namespace-children-content" data-direct="1"></div>
+            </div>
+        </div>
+    </template>
+
+    <template id="ns-key">
+        <div class="{{ row }}">
+            <a class="ns-key flex-1 min-w-0 truncate font-semibold text-primary-500 dark:text-primary-400 hover:text-primary-700 dark:hover:text-primary-500"></a>
+            <span class="ns-size w-20 md:w-24 shrink-0 text-right" title="Size"></span>
             {{ size_bar }}
             {% if show_actions %}
                 <span class="w-10 md:w-36 shrink-0"></span>
