@@ -11,10 +11,17 @@ namespace RobiNN\Pca\Dashboards\Redis\Compatibility\Cluster;
 use Exception;
 use InvalidArgumentException;
 use Predis\Client as PredisClient;
+use Predis\Cluster\RedisStrategy;
 use Predis\Collection\Iterator\Keyspace;
+use Predis\Command\RawCommand;
+use Predis\NotSupportedException;
+use Predis\Response\Status;
 use RobiNN\Pca\Dashboards\DashboardException;
+use RobiNN\Pca\Dashboards\Redis\Compatibility\Predis;
 use RobiNN\Pca\Dashboards\Redis\Compatibility\RedisCompatibilityInterface;
 use RobiNN\Pca\Dashboards\Redis\Compatibility\RedisExtra;
+use RuntimeException;
+use Throwable;
 
 /**
  * @method bool restore(string $key, int $ttl, string $value)
@@ -38,7 +45,8 @@ class PredisCluster extends PredisClient implements RedisCompatibilityInterface 
         'zset'      => 'zset',
         'hash'      => 'hash',
         'stream'    => 'stream',
-        'ReJSON-RL' => 'rejson',
+        'vectorset' => 'vectorset',
+        'ReJSON-RL' => 'json',
     ];
 
     /**
@@ -46,22 +54,26 @@ class PredisCluster extends PredisClient implements RedisCompatibilityInterface 
      *
      * @throws DashboardException
      */
-    public function __construct(array $server) {
+    public function __construct(private readonly array $server) {
         $cluster_options = ['cluster' => 'redis'];
 
-        if (isset($server['password'])) {
-            $cluster_options['parameters']['password'] = $server['password'];
+        if (isset($this->server['password'])) {
+            $cluster_options['parameters']['password'] = $this->server['password'];
+
+            if (isset($this->server['username'])) {
+                $cluster_options['parameters']['username'] = $this->server['username'];
+            }
         }
 
         try {
-            parent::__construct($server['nodes'], $cluster_options);
+            parent::__construct($this->server['nodes'], $cluster_options);
             $this->connect();
 
-            foreach ($server['nodes'] as $node) {
+            foreach ($this->server['nodes'] as $node) {
                 $this->nodes[] = new PredisClient('tcp://'.$node, $cluster_options);
             }
         } catch (Exception $e) {
-            throw new DashboardException($e->getMessage().' ['.implode(', ', $server['nodes']).']');
+            throw new DashboardException($e->getMessage().' ['.implode(', ', $this->server['nodes']).']', $e->getCode(), $e);
         }
     }
 
@@ -85,46 +97,29 @@ class PredisCluster extends PredisClient implements RedisCompatibilityInterface 
      * @return array<string, array<string, mixed>>
      */
     public function getInfo(?string $option = null, ?array $combine = null): array {
-        static $info = null;
+        if ($this->info_cache !== null) {
+            $info = $this->aggregatedData($this->info_cache, $combine);
 
-        if ($info !== null) {
             return $option !== null ? ($info[strtolower($option)] ?? []) : $info;
         }
 
         $aggregated = [];
 
         foreach ($this->nodes as $node) {
-            foreach ($this->getInfoSections() as $section_name) {
-                try {
-                    $response = $node->info($section_name);
-                    $node_section_info = (is_array($response) && $response !== []) ? reset($response) : null;
+            try {
+                $node_info = $this->parseInfoOutput((string) $node->executeRaw(['INFO', 'all']));
+            } catch (Exception) {
+                continue;
+            }
 
-                    if (!$node_section_info || !is_array($node_section_info)) {
-                        continue;
-                    }
-
-                    $section_lower = strtolower($section_name);
-
-                    foreach ($node_section_info as $key => $value) {
-                        if ($section_lower === 'commandstats' || $section_lower === 'keyspace') {
-                            $aggregated[$section_lower][$key][] = $value;
-                            continue;
-                        }
-
-                        if (is_array($value)) {
-                            foreach ($value as $sub_key => $sub_val) {
-                                $aggregated[$section_lower][$key][$sub_key][] = $sub_val;
-                            }
-                        } else {
-                            $aggregated[$section_lower][$key][] = $value;
-                        }
-                    }
-                } catch (Exception) {
-                    continue;
+            foreach ($node_info as $section => $section_data) {
+                foreach ($section_data as $key => $value) {
+                    $aggregated[$section][$key][] = $value;
                 }
             }
         }
 
+        $this->info_cache = $aggregated;
         $info = $this->aggregatedData($aggregated, $combine);
 
         return $option !== null ? ($info[strtolower($option)] ?? []) : $info;
@@ -148,53 +143,21 @@ class PredisCluster extends PredisClient implements RedisCompatibilityInterface 
     /**
      * @return array<int, string>
      */
-    public function scanKeys(string $pattern, int $count): array {
+    public function scanKeys(string $pattern, int $count, ?int $limit = null): array {
+        $limit ??= $count;
         $keys = [];
 
         foreach ($this->nodes as $node) {
-            foreach (new Keyspace($node, $pattern) as $item) {
+            foreach (new Keyspace($node, $pattern, $count) as $item) {
                 $keys[] = $item;
 
-                if (count($keys) === $count) {
-                    break;
+                if (count($keys) >= $limit) {
+                    return $keys;
                 }
             }
         }
 
         return $keys;
-    }
-
-    /**
-     * @return array{cursor: int|string, keys: array<int, string>}
-     */
-    public function scanKeysWithCursor(string $pattern, int $count, int|string|null $cursor): array {
-        // In cluster mode, iterate over all nodes to get the keys
-        $keys = [];
-        $iterator = $cursor ?? 0;
-        $new_cursor = 0;
-
-        foreach ($this->nodes as $node) {
-            $result = $node->scan($iterator, [
-                'MATCH' => $pattern,
-                'COUNT' => $count,
-            ]);
-
-            if (isset($result[1]) && is_array($result[1])) {
-                foreach ($result[1] as $key) {
-                    $keys[] = $key;
-                }
-            }
-
-            if (isset($result[0]) && $result[0] !== 0 && $result[0] !== '0') {
-                $new_cursor = $result[0];
-                break;
-            }
-        }
-
-        return [
-            'cursor' => $new_cursor,
-            'keys'   => $keys,
-        ];
     }
 
     public function listRem(string $key, string $value, int $count): int {
@@ -206,6 +169,82 @@ class PredisCluster extends PredisClient implements RedisCompatibilityInterface 
      */
     public function streamAdd(string $key, string $id, array $messages): string {
         return $this->xadd($key, $messages, $id);
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     *
+     * @throws Throwable
+     */
+    public function streamGroups(string $key): array {
+        return $this->xinfo->groups($key) ?: [];
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    public function streamConsumers(string $key, string $group): array {
+        return $this->xinfo->consumers($key, $group) ?: [];
+    }
+
+    /**
+     * @return array<int, mixed>
+     */
+    public function streamPending(string $key, string $group): array {
+        return $this->xpending($key, $group) ?: [];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function streamReadGroup(string $key, string $group, string $consumer, int $count): array {
+        return $this->xreadgroup_claim($group, $consumer, [$key => '>'], $count) ?: [];
+    }
+
+    public function streamCreateGroup(string $key, string $group, string $id = '0'): bool {
+        return (string) $this->xgroup->create($key, $group, $id) === 'OK';
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function vectorInfo(string $key): array {
+        $info = $this->vinfo($key);
+
+        return is_array($info) ? $info : [];
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    public function vectorMembers(string $key, int $count): array {
+        $members = $this->vrandmember($key, $count);
+
+        return is_array($members) ? array_map(strval(...), $members) : [];
+    }
+
+    /**
+     * @return array<int, float>
+     */
+    public function vectorEmbedding(string $key, string $element): array {
+        return $this->parseVectorEmbedding($this->vemb($key, $element));
+    }
+
+    public function vectorAttributes(string $key, string $element): string {
+        $attributes = $this->vgetattr($key, $element, true);
+
+        return is_string($attributes) ? $attributes : '';
+    }
+
+    /**
+     * @param array<int, float|string> $vector
+     */
+    public function vectorAdd(string $key, string $element, array $vector, string $attributes = ''): bool {
+        return $this->vadd($key, $vector, $element, attributes: $attributes !== '' ? $attributes : null);
+    }
+
+    public function vectorRem(string $key, string $element): bool {
+        return $this->vrem($key, $element);
     }
 
     public function rawcommand(string $command, mixed ...$arguments): mixed {
@@ -234,15 +273,27 @@ class PredisCluster extends PredisClient implements RedisCompatibilityInterface 
             return [];
         }
 
+        $results = $this->pipeline(static function ($pipe) use ($keys, $script_sha): void {
+            foreach ($keys as $key) {
+                $pipe->evalsha($script_sha, 1, $key);
+            }
+        });
+
+        if (!is_array($results)) {
+            return [];
+        }
+
         $data = [];
 
-        foreach ($keys as $key) {
-            $results = $this->evalsha($script_sha, 1, $key);
+        foreach (array_values($keys) as $i => $key) {
+            $result = $results[$i] ?? null;
 
-            if (is_array($results) && count($results) >= 3) {
+            if (is_array($result) && count($result) >= 3) {
                 $data[$key] = [
-                    'ttl'   => $results[0], 'type' => $results[1], 'size' => $results[2] ?? 0,
-                    'count' => isset($results[3]) && is_numeric($results[3]) ? (int) $results[3] : null,
+                    'ttl'   => $result[0],
+                    'type'  => $this->data_types[(string) $result[1]] ?? $result[1],
+                    'size'  => $result[2] ?? 0,
+                    'count' => isset($result[3]) && is_numeric($result[3]) ? (int) $result[3] : null,
                 ];
             }
         }
@@ -259,6 +310,27 @@ class PredisCluster extends PredisClient implements RedisCompatibilityInterface 
         }
 
         return 0;
+    }
+
+    public function keyEncoding(string $key): string {
+        $encoding = $this->object('encoding', $key);
+
+        return is_string($encoding) ? $encoding : '';
+    }
+
+    /**
+     * @param array<int, string> $fields
+     *
+     * @return array<string, int>
+     */
+    public function hashFieldTtl(string $key, array $fields): array {
+        return $this->parseHashFieldTtl($this->httl($key, $fields), $fields);
+    }
+
+    public function hashFieldExpire(string $key, string $field, int $ttl): bool {
+        $reply = $ttl > 0 ? $this->hexpire($key, $ttl, [$field]) : $this->hpersist($key, [$field]);
+
+        return $this->hashFieldExpireApplied($reply);
     }
 
     public function flushDatabase(): bool {
@@ -280,9 +352,11 @@ class PredisCluster extends PredisClient implements RedisCompatibilityInterface 
     }
 
     /**
+     * @return array<string, mixed>|true
+     *
      * @throws InvalidArgumentException
      */
-    public function execConfig(string $operation, mixed ...$args): mixed {
+    public function execConfig(string $operation, mixed ...$args): array|true {
         switch (strtoupper($operation)) {
             case 'GET':
                 if ($args === []) {
@@ -342,15 +416,217 @@ class PredisCluster extends PredisClient implements RedisCompatibilityInterface 
     }
 
     /**
-     * @return array<int, string>
+     * @return array<int, array<string, mixed>>
      */
-    public function getCommands(): array {
-        $commands = $this->nodes[0]->executeRaw(['COMMAND']);
+    public function latencyLatest(): array {
+        $events = [];
 
-        return array_column($commands, 0);
+        foreach ($this->nodes as $i => $node) {
+            $node_events = $this->parseLatencyLatest($node->executeRaw(['LATENCY', 'LATEST']), (string) $this->server['nodes'][$i]);
+
+            if ($node_events !== []) {
+                array_push($events, ...$node_events);
+            }
+        }
+
+        return $events;
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    public function latencyHistory(string $event): array {
+        $samples = [];
+
+        foreach ($this->nodes as $i => $node) {
+            $node_samples = $this->parseLatencyHistory(
+                $node->executeRaw(['LATENCY', 'HISTORY', $event]),
+                (string) $this->server['nodes'][$i]
+            );
+
+            if ($node_samples !== []) {
+                array_push($samples, ...$node_samples);
+            }
+        }
+
+        usort($samples, static fn (array $a, array $b): int => $a['time'] <=> $b['time']);
+
+        return $samples;
+    }
+
+    public function latencyReset(): bool {
+        foreach ($this->nodes as $node) {
+            $node->executeRaw(['LATENCY', 'RESET']);
+        }
+
+        return true;
+    }
+
+    public function latencyDoctor(): string {
+        return $this->perNodeReply(['LATENCY', 'DOCTOR']);
+    }
+
+    public function memoryDoctor(): string {
+        return $this->perNodeReply(['MEMORY', 'DOCTOR']);
+    }
+
+    /**
+     * @param array<int, string> $command
+     */
+    private function perNodeReply(array $command): string {
+        $replies = [];
+
+        foreach ($this->nodes as $i => $node) {
+            $replies[] = $this->server['nodes'][$i].': '.trim((string) $node->executeRaw($command));
+        }
+
+        return implode("\n\n", $replies);
+    }
+
+    public function commandExists(string $command): bool {
+        $info = $this->nodes[0]->executeRaw(['COMMAND', 'INFO', $command]);
+
+        return is_array($info[0] ?? null);
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    public function getClients(): array {
+        $clients = [];
+
+        foreach ($this->nodes as $i => $node) {
+            $self_id = $node->executeRaw(['CLIENT', 'ID']);
+            $node_clients = $this->parseClientList(
+                (string) $node->executeRaw(['CLIENT', 'LIST']),
+                is_numeric($self_id) ? (string) $self_id : null,
+                (string) $this->server['nodes'][$i] // the clients are built from this list, in this order
+            );
+
+            if ($node_clients !== []) {
+                array_push($clients, ...$node_clients);
+            }
+        }
+
+        return $clients;
+    }
+
+    public function killClient(string $id): bool {
+        $killed = false;
+
+        foreach ($this->nodes as $node) {
+            $killed = (int) $node->executeRaw(['CLIENT', 'KILL', 'ID', $id]) > 0 || $killed;
+        }
+
+        return $killed;
     }
 
     public function restoreKeys(string $key, int $ttl, string $value): bool {
         return (string) $this->restore($key, $ttl, $value) === 'OK';
+    }
+
+    /**
+     * @throws Exception
+     */
+    public function jsonGet(string $key): string {
+        return (string) $this->json('jsonget', $key, [$key]);
+    }
+
+    /**
+     * @throws Exception
+     */
+    public function jsonSet(string $key, mixed $path): bool {
+        return (string) $this->json('jsonset', $key, [$key, '$', $path]) === 'OK';
+    }
+
+    /**
+     * Predis cannot route JSON.* commands on its own, so the slot is computed from the key and set on the (native) command explicitly.
+     *
+     * @param array<int, mixed> $arguments
+     *
+     * @throws Exception
+     */
+    private function json(string $id, string $key, array $arguments): mixed {
+        $command = $this->createCommand($id, $arguments);
+        $command->setSlot((new RedisStrategy())->getSlotByKey($key));
+
+        try {
+            return $this->executeCommand($command);
+        } catch (Throwable $e) {
+            throw new RuntimeException($e->getMessage(), (int) $e->getCode(), $e);
+        }
+    }
+
+    protected function moduleList(): mixed {
+        return $this->nodes[0]->executeRaw(['MODULE', 'LIST']);
+    }
+
+    /**
+     * @return array{channels: array<string, int>, patterns: int}
+     */
+    public function pubSubStats(string $pattern = '*'): array {
+        $channels = [];
+        $patterns = 0;
+
+        foreach ($this->nodes as $node) {
+            try {
+                $node_channels = $node->executeRaw(['PUBSUB', 'CHANNELS', $pattern]);
+
+                if (is_array($node_channels) && $node_channels !== []) {
+                    $numsub = $node->executeRaw(array_merge(['PUBSUB', 'NUMSUB'], $node_channels));
+
+                    foreach ($this->parseNumSubReply(is_array($numsub) ? $numsub : []) as $channel => $subscribers) {
+                        $channels[$channel] = ($channels[$channel] ?? 0) + $subscribers;
+                    }
+                }
+
+                $numpat = $node->executeRaw(['PUBSUB', 'NUMPAT']);
+                $patterns += is_numeric($numpat) ? (int) $numpat : 0;
+            } catch (Exception) {
+                continue;
+            }
+        }
+
+        return ['channels' => $channels, 'patterns' => $patterns];
+    }
+
+    public function publishMessage(string $channel, string $message): int {
+        return (int) $this->nodes[0]->executeRaw(['PUBLISH', $channel, $message]);
+    }
+
+    /**
+     * Messages are broadcast to all cluster nodes, so subscribing to a single node is enough.
+     *
+     * @return array<int, array{channel: string, message: string, time: int}>
+     */
+    public function captureMessages(string $pattern, int $seconds, int $limit): array {
+        [$host, $port] = explode(':', (string) $this->server['nodes'][0]) + [1 => '6379'];
+
+        $server = ['host' => $host, 'port' => (int) $port];
+
+        foreach (['username', 'password'] as $key) {
+            if (isset($this->server[$key])) {
+                $server[$key] = $this->server[$key];
+            }
+        }
+
+        return (new Predis($server))->captureMessages($pattern, $seconds, $limit);
+    }
+
+    /**
+     * @param array<int, string> $args
+     *
+     * @throws Throwable
+     */
+    public function consoleCommand(array $args): mixed {
+        $command = RawCommand::create(...$args);
+
+        try {
+            $reply = $this->executeCommand($command);
+        } catch (NotSupportedException) {
+            $reply = $this->nodes[0]->executeCommand($command);
+        }
+
+        return $reply instanceof Status ? $reply->getPayload() : $reply;
     }
 }

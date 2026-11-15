@@ -9,10 +9,13 @@ declare(strict_types=1);
 namespace RobiNN\Pca\Dashboards\Redis;
 
 use Exception;
+use JsonException;
 use RobiNN\Pca\Helpers;
 use RobiNN\Pca\Http;
 
 trait RedisTypes {
+    private int $max_vector_members = 1000;
+
     /**
      * Get all data types.
      *
@@ -23,11 +26,15 @@ trait RedisTypes {
      * @throws Exception
      */
     public function getAllTypes(): array {
-        static $types = [];
+        $types = [];
         $exclude = ['none', 'other'];
 
         if (!$this->redis->checkModule('ReJSON')) {
-            $exclude[] = 'rejson';
+            $exclude[] = 'json';
+        }
+
+        if (!$this->redis->checkModule('vectorset')) {
+            $exclude[] = 'vectorset';
         }
 
         foreach ($this->redis->data_types as $type) {
@@ -46,16 +53,17 @@ trait RedisTypes {
      *
      * @return array<string, array<string, array<int, string>|string>>
      */
-    private function typesTplOptions(): array {
+    public function typesTplOptions(): array {
         return [
-            'extra'  => [
+            'extra'     => [
                 'hide_title' => ['set'],
             ],
-            'set'    => ['param' => 'member', 'title' => ''],
-            'list'   => ['param' => 'index', 'title' => 'Index'],
-            'zset'   => ['param' => 'range', 'title' => 'Score'],
-            'hash'   => ['param' => 'hash_key', 'title' => 'Field'],
-            'stream' => ['param' => 'stream_id', 'title' => 'Entry ID'],
+            'set'       => ['param' => 'member', 'title' => ''],
+            'list'      => ['param' => 'index', 'title' => 'Index'],
+            'zset'      => ['param' => 'range', 'title' => 'Score'],
+            'hash'      => ['param' => 'hash_key', 'title' => 'Field'],
+            'stream'    => ['param' => 'stream_id', 'title' => 'Entry ID'],
+            'vectorset' => ['param' => 'element', 'title' => 'Element'],
         ];
     }
 
@@ -68,7 +76,7 @@ trait RedisTypes {
      *
      * @throws Exception
      */
-    private function getKeyValue(string $type, string $key): array {
+    public function getKeyValue(string $type, string $key): array {
         $index = null;
         $score = 0;
         $hash_key = '';
@@ -104,8 +112,12 @@ trait RedisTypes {
                 $value = $ranges[$stream_id] ?? [];
                 $value = json_encode($value, JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
                 break;
-            case 'rejson':
+            case 'json':
                 $value = $this->redis->jsonGet($key);
+                break;
+            case 'vectorset':
+                $element = (string) Http::get('element', '');
+                $value = implode(', ', $this->redis->vectorEmbedding($key, $element));
                 break;
             default:
                 $value = '';
@@ -131,13 +143,14 @@ trait RedisTypes {
             'zset' => $this->redis->zRange($key, 0, -1),
             'hash' => $this->redis->hGetAll($key),
             'stream' => $this->redis->xRange($key, '-', '+'),
-            'rejson' => $this->redis->jsonGet($key),
+            'json' => $this->redis->jsonGet($key),
+            'vectorset' => array_combine($members = $this->redis->vectorMembers($key, $this->max_vector_members), $members),
             default => '',
         };
     }
 
     /**
-     * Save key with correct function.
+     * Save the key with the correct function.
      *
      * Used in saveKey().
      *
@@ -169,7 +182,7 @@ trait RedisTypes {
                     $this->redis->lSet($key, (int) $index, $value);
                 } else {
                     Http::stopRedirect();
-                    Helpers::alert($this->template, 'Out of bounds index.', 'error');
+                    Helpers::alert('Out of bounds index.', 'error');
                 }
 
                 break;
@@ -183,6 +196,7 @@ trait RedisTypes {
                 }
 
                 $this->redis->hSet($key, $options['hash_key'], $value);
+                $this->storeHashFieldTtl($key, (string) $options['hash_key'], $options['hash_ttl'] ?? null);
                 break;
             case 'stream':
                 if ($options['stream_id'] === Http::get('stream_id', '')) {
@@ -202,8 +216,24 @@ trait RedisTypes {
 
                 $this->redis->streamAdd($key, $options['stream_id'], $fields);
                 break;
-            case 'rejson':
+            case 'json':
                 $this->redis->jsonSet($key, $value);
+                break;
+            case 'vectorset':
+                $element = (string) ($options['element'] ?? '');
+                $vector = $this->parseVector($value);
+
+                if ($element === '' || $vector === []) {
+                    Http::stopRedirect();
+                    Helpers::alert('An element name and a vector of numbers are required.', 'error');
+                    break;
+                }
+
+                if (Http::get('element', '') !== $element) {
+                    $this->redis->vectorRem($key, (string) Http::get('element', ''));
+                }
+
+                $this->redis->vectorAdd($key, $element, $vector);
                 break;
             default:
         }
@@ -216,6 +246,21 @@ trait RedisTypes {
             } elseif ($ttl === -1) {
                 $this->redis->persist($key);
             }
+        }
+    }
+
+    /**
+     * @throws Exception
+     */
+    private function storeHashFieldTtl(string $key, string $field, mixed $ttl): void {
+        if (!is_numeric($ttl) || !$this->isCommandSupported('HTTL')) {
+            return;
+        }
+
+        $ttl = (int) $ttl;
+
+        if ($ttl > 0 || $ttl === -1) {
+            $this->redis->hashFieldExpire($key, $field, $ttl);
         }
     }
 
@@ -242,7 +287,40 @@ trait RedisTypes {
             case 'stream':
                 $this->redis->xDel($key, [$subkey]);
                 break;
+            case 'vectorset':
+                $this->redis->vectorRem($key, (string) $subkey);
+                break;
             default:
         }
+    }
+
+    /**
+     * A vector typed into the form, either as a JSON array or as plain separated numbers.
+     *
+     * @return array<int, float>
+     *
+     * @throws JsonException
+     */
+    private function parseVector(string $value): array {
+        $value = trim($value);
+
+        if ($value === '') {
+            return [];
+        }
+
+        if (json_validate($value)) {
+            $decoded = json_decode($value, true, 512, JSON_THROW_ON_ERROR);
+
+            if (is_array($decoded)) {
+                $numbers = array_filter($decoded, is_numeric(...));
+
+                return count($numbers) === count($decoded) ? array_map(floatval(...), array_values($decoded)) : [];
+            }
+        }
+
+        $parts = preg_split('/[\s,]+/', trim($value, "[] \t\n\r"), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+        $numbers = array_filter($parts, is_numeric(...));
+
+        return count($numbers) === count($parts) ? array_map(floatval(...), $parts) : [];
     }
 }

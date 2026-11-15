@@ -14,11 +14,19 @@ use Exception;
 
 class Format {
     public static function bytes(int $bytes, int $decimals = 2): string {
-        if ($bytes > 1_048_576) {
+        if ($bytes >= 1_099_511_627_776) {
+            return sprintf('%sTB', self::number($bytes / 1_099_511_627_776, $decimals));
+        }
+
+        if ($bytes >= 1_073_741_824) {
+            return sprintf('%sGB', self::number($bytes / 1_073_741_824, $decimals));
+        }
+
+        if ($bytes >= 1_048_576) {
             return sprintf('%sMB', self::number($bytes / 1_048_576, $decimals));
         }
 
-        if ($bytes > 1024) {
+        if ($bytes >= 1024) {
             return sprintf('%sKB', self::number($bytes / 1024, $decimals));
         }
 
@@ -29,27 +37,23 @@ class Format {
      * @link https://www.php.net/manual/en/faq.using.php#faq.using.shorthandbytes
      */
     public static function iniSizeToBytes(string $ini_size): int {
-        $size = (int) substr($ini_size, 0, -1);
         $unit = strtoupper(substr($ini_size, -1));
 
-        switch ($unit) {
-            case 'K':
-                $size *= 1024;
-                break;
-            case 'M':
-                $size *= 1024 * 1024;
-                break;
-            case 'G':
-                $size *= 1024 * 1024 * 1024;
-                break;
-            default:
-                break;
+        // Values without a shorthand suffix are plain bytes.
+        if (!in_array($unit, ['K', 'M', 'G'], true)) {
+            return (int) $ini_size;
         }
 
-        return $size;
+        $size = (int) substr($ini_size, 0, -1);
+
+        return match ($unit) {
+            'K' => $size * 1024,
+            'M' => $size * 1024 * 1024,
+            'G' => $size * 1024 * 1024 * 1024,
+        };
     }
 
-    public static function seconds(int $time, int $granularity = PHP_INT_MAX): string {
+    public static function seconds(int $time, bool $show_seconds = true): string {
         if ($time === -1) {
             return (string) $time;
         }
@@ -76,15 +80,38 @@ class Format {
             'second' => (int) $seconds,
         ];
 
+        if (!$show_seconds) {
+            unset($sections['second']);
+        }
+
         $time_parts = [];
 
         foreach ($sections as $name => $value) {
-            if ($value > 0 && count($time_parts) < $granularity) {
+            if ($value > 0) {
                 $time_parts[] = $value.' '.$name.($value === 1 ? '' : 's');
             }
         }
 
-        return $time_parts !== [] ? implode(' ', $time_parts) : '0 seconds';
+        if ($time_parts !== []) {
+            return implode(' ', $time_parts);
+        }
+
+        return $show_seconds ? '0 seconds' : 'less than a minute';
+    }
+
+    /**
+     * Remaining TTL rounded to its largest unit (e.g. "3 hours"), a non-numeric value (e.g. "Doesn't expire") is kept.
+     */
+    public static function countdown(int|string $ttl): string {
+        if (!is_numeric($ttl)) {
+            return $ttl;
+        }
+
+        if ((int) $ttl <= 0) {
+            return 'Expired';
+        }
+
+        return implode(' ', array_slice(explode(' ', self::seconds((int) $ttl)), 0, 2));
     }
 
     public static function time(int $time): string {
@@ -92,18 +119,24 @@ class Format {
             return 'Never';
         }
 
+        static $timezone = null;
+
         $format = Config::get('timeformat', 'd. m. Y H:i:s');
 
         try {
-            return (new DateTimeImmutable('@'.$time))
-                ->setTimezone(new DateTimeZone(Config::get('timezone', date_default_timezone_get())))
-                ->format($format);
+            $timezone ??= new DateTimeZone(Config::get('timezone', date_default_timezone_get()));
+
+            return (new DateTimeImmutable('@'.$time))->setTimezone($timezone)->format($format);
         } catch (Exception) {
             return date($format, $time);
         }
     }
 
     public static function timeDiff(int $from, ?int $to = null): string {
+        if ($from <= 0) {
+            return 'Never';
+        }
+
         $units = [
             'year'   => 365 * 24 * 60 * 60,
             'month'  => 30 * 24 * 60 * 60,
@@ -127,31 +160,7 @@ class Format {
         return '1 second ago';
     }
 
-    /**
-     * Formats a TTL (remaining time) in readable format with countdown.
-     *
-     * @param int $expiry_timestamp Expiration timestamp (0 = never expires, -1 = does not expire)
-     */
-    public static function countdown(int $expiry_timestamp): string {
-        if ($expiry_timestamp <= 0) {
-            return "Doesn't expire";
-        }
-
-        $remaining = $expiry_timestamp - time();
-
-        if ($remaining <= 0) {
-            return 'Expired';
-        }
-
-        return self::seconds($remaining, 1);
-    }
-
     public static function number(float $number, int $decimals = 0): string {
-        // If the number is effectively an integer (e.g., 50.00), force decimals to 0
-        if ($number == (int)$number) {
-            $decimals = 0;
-        }
-
         return number_format(
             $number,
             $decimals,

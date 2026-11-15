@@ -9,32 +9,50 @@ declare(strict_types=1);
 namespace Tests;
 
 use JsonException;
+use Random\RandomException;
 use RobiNN\Pca\Helpers;
-use RobiNN\Pca\Template;
 
 abstract class TestCase extends \PHPUnit\Framework\TestCase {
+    public static function skipWithoutServer(string $address, string $name): void {
+        $socket = @stream_socket_client('tcp://'.$address, $errno, $errstr, 1);
+
+        if ($socket === false) {
+            self::markTestSkipped('No '.$name.' on '.$address.'. Skipping tests.');
+        }
+
+        fclose($socket);
+    }
+
     /**
      * @param array<int, string>|string $keys
      */
-    public function deleteKeysHelper(Template $template, array|string $keys, callable $delete_key, bool $base64 = false): void {
-        if ($base64) {
-            $keys_b64 = is_array($keys) ? array_map(base64_encode(...), $keys) : base64_encode($keys);
-        }
+    public function deleteKeysHelper(array|string $keys, callable $delete_key): void {
+        $keys_b64 = is_array($keys) ? array_map(base64_encode(...), $keys) : base64_encode($keys);
 
         try {
-            $_POST['delete'] = json_encode($keys_b64 ?? $keys, JSON_THROW_ON_ERROR);
+            $_POST['delete'] = json_encode($keys_b64, JSON_THROW_ON_ERROR);
         } catch (JsonException) {
             //
         }
 
         $this->assertSame(
-            Helpers::alert($template, (is_array($keys) ? 'Keys' : 'Key "'.$keys.'"').' has been deleted.', 'success'),
-            Helpers::deleteKey($template, $delete_key, $base64)
+            Helpers::alert(is_array($keys) ? 'Keys have been deleted.' : 'Key "'.$keys.'" has been deleted.', 'success'),
+            Helpers::deleteKey($delete_key)
         );
+    }
+
+    public function setCsrfToken(bool $valid = true): void {
+        if (session_status() === PHP_SESSION_NONE) {
+            @session_start();
+        }
+
+        $_SESSION['csrf_token'] = 'pu-test-csrf';
+        $_POST['csrf_token'] = $valid ? 'pu-test-csrf' : 'invalid-token';
     }
 
     /**
      * @return array<int, mixed>
+     * @throws RandomException
      */
     public static function keysProvider(): array {
         return [
@@ -46,6 +64,9 @@ abstract class TestCase extends \PHPUnit\Framework\TestCase {
             ['gzdeflate', gzdeflate('test'), gzdeflate('test')],
             ['array', ['key1', 'key2'], 'a:2:{i:0;s:4:"key1";i:1;s:4:"key2";}'],
             ['object', (object) ['key1', 'key2'], 'O:8:"stdClass":2:{s:1:"0";s:4:"key1";s:1:"1";s:4:"key2";}'],
+            ['multiline', "line one\r\nline two\r\nline three", "line one\r\nline two\r\nline three"],
+            ['protocol_end', "first\r\nEND\r\nlast", "first\r\nEND\r\nlast"],
+            ['binary_large', $binary = random_bytes(100_000), $binary], // forces multi-chunk socket reads
         ];
     }
 
@@ -88,11 +109,6 @@ abstract class TestCase extends \PHPUnit\Framework\TestCase {
                 if (isset($item['info'][$field])) {
                     $item['info'][$field] = 0;
                 }
-            }
-
-            // Normalize folder size if bytes_size is in the fields
-            if (in_array('bytes_size', $fields, true) && isset($item['size'])) {
-                $item['size'] = 0;
             }
 
             if (isset($item['children']) && is_array($item['children'])) {

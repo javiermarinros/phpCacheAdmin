@@ -1,53 +1,69 @@
-{{ include('components/tabs.twig', {
-    tabs: true,
-    pills: true,
-    selected: config('metricstab', 1440),
-    links: {
-        60: 'Last hour',
-        1440: 'Last day',
-        10080: 'Last week',
-        43200: 'Last month',
-    },
-}) }}
+{% if health is not empty %}
+    <div class="mb-4">
+        {{ include('partials/health.twig', {checks: health, grid: 'grid-cols-1 sm:grid-cols-2 xl:grid-cols-4'}) }}
+    </div>
+{% endif %}
 
-<div class="gap-4 md:grid md:grid-cols-4">
-    <div class="col-span-4 p-4 mb-2 bg-white rounded-md border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
+{{ include('partials/metrics_header.twig', {dashboard: 'redis', sampling: 'one INFO'}) }}
+
+{{ include('partials/metrics_tiles.twig', {tiles: [
+    {id: 'commands', label: 'Commands'},
+    {id: 'hit_rate', label: 'Hit rate'},
+    {id: 'memory', label: 'Memory'},
+    {id: 'fragmentation', label: 'Fragmentation'},
+]}) }}
+
+<div class="gap-4 lg:grid lg:grid-cols-4">
+    <div class="col-span-4 p-4 mb-2 card">
         <div id="command_calls_chart" class="h-90"></div>
     </div>
-    <div class="col-span-2 p-4 mb-2 bg-white rounded-md border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
+    <div class="col-span-2 p-4 mb-2 card">
         <div id="memory_chart" class="h-90"></div>
     </div>
-    <div class="col-span-2 p-4 mb-2 bg-white rounded-md border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
+    <div class="col-span-2 p-4 mb-2 card">
         <div id="fragmentation_chart" class="h-90"></div>
     </div>
-    <div class="col-span-2 p-4 mb-2 bg-white rounded-md border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
+    <div class="col-span-2 p-4 mb-2 card">
         <div id="commands_chart" class="h-90"></div>
     </div>
-    <div class="col-span-2 p-4 mb-2 bg-white rounded-md border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
+    <div class="col-span-2 p-4 mb-2 card">
         <div id="hit_rate_chart" class="h-90"></div>
     </div>
-    <div class="col-span-2 p-4 mb-2 bg-white rounded-md border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
+    <div class="col-span-2 p-4 mb-2 card">
         <div id="connections_chart" class="h-90"></div>
     </div>
 </div>
 
-<script src="{{ config('pcapath', '') }}assets/js/echarts.min.js"></script>
-<script>
+<script src="{{ asset('assets/js/echarts.min.js') }}"></script>
+<script nonce="{{ nonce }}">
     document.addEventListener('DOMContentLoaded', () => {
         const initial_theme = document.documentElement.classList.contains('dark') ? 'dark' : null;
 
         const chart_config = {
-            command_calls: echarts.init(document.getElementById('command_calls_chart'), initial_theme, {renderer: 'svg'}),
-            memory: echarts.init(document.getElementById('memory_chart'), initial_theme, {renderer: 'svg'}),
-            fragmentation: echarts.init(document.getElementById('fragmentation_chart'), initial_theme, {renderer: 'svg'}),
-            commands: echarts.init(document.getElementById('commands_chart'), initial_theme, {renderer: 'svg'}),
-            hit_rate: echarts.init(document.getElementById('hit_rate_chart'), initial_theme, {renderer: 'svg'}),
-            connections: echarts.init(document.getElementById('connections_chart'), initial_theme, {renderer: 'svg'}),
+            command_calls: echarts.init(document.getElementById('command_calls_chart'), initial_theme, {renderer: 'canvas'}),
+            memory: echarts.init(document.getElementById('memory_chart'), initial_theme, {renderer: 'canvas'}),
+            fragmentation: echarts.init(document.getElementById('fragmentation_chart'), initial_theme, {renderer: 'canvas'}),
+            commands: echarts.init(document.getElementById('commands_chart'), initial_theme, {renderer: 'canvas'}),
+            hit_rate: echarts.init(document.getElementById('hit_rate_chart'), initial_theme, {renderer: 'canvas'}),
+            connections: echarts.init(document.getElementById('connections_chart'), initial_theme, {renderer: 'canvas'}),
+        };
+
+        const render_tiles = (point) => {
+            metric_tile('commands', number_format(point.commands_per_second) + '/s', `${number_format(point.connections)} connections`);
+            metric_tile('hit_rate', number_format(point.hit_rate, 2) + '%', 'share of the keyspace lookups that found a key');
+            metric_tile('memory', format_bytes(point.memory.used), `${format_bytes(point.memory.peak)} peak`);
+            metric_tile(
+                'fragmentation',
+                number_format(point.memory.fragmentation, 2),
+                'ratio of the memory the allocator holds to the memory in use'
+            );
         };
 
         const render_charts = (data) => {
             if (!data || data.length === 0) return;
             const timestamps = data.map(p => p.timestamp.split(' ')[1]);
+
+            render_tiles(data[data.length - 1]);
 
             const command_series = [...new Set(data.flatMap(p => Object.keys(p.commands_stats ?? {})))].map(name => ({
                 name: name,
@@ -57,13 +73,14 @@
                 emphasis: {focus: 'series'},
                 data: data.map((p, i) => {
                     if (i === 0 || !p.commands_stats || !data[i - 1].commands_stats) return 0;
-                    const val = (p.commands_stats?.[name] ?? 0) - (data[i - 1].commands_stats?.[name] ?? 0);
-                    return val < 0 ? 0 : val;
+                    const seconds = Math.max(1, p.unix_timestamp - data[i - 1].unix_timestamp);
+                    const calls = (p.commands_stats?.[name] ?? 0) - (data[i - 1].commands_stats?.[name] ?? 0);
+                    return calls > 0 ? Number((calls / seconds).toFixed(2)) : 0;
                 })
             })).filter(s => s.data.some(v => v > 0));
 
             chart(chart_config.command_calls, {
-                title: 'Command Calls',
+                title: 'Command Calls per second',
                 legend: command_series.map(s => s.name),
                 tooltip: {
                     confine: true,
@@ -82,7 +99,7 @@
                         return html;
                     }
                 },
-                yAxis: {type: 'value', name: 'Calls'},
+                yAxis: {type: 'value', name: 'Calls/s'},
                 series: command_series
             }, timestamps);
 
@@ -134,6 +151,6 @@
             }, timestamps);
         };
 
-        init_metrics(render_charts, chart_config);
+        new Metrics(render_charts, chart_config);
     });
 </script>

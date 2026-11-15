@@ -14,15 +14,8 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use RobiNN\Pca\Helpers;
 use RobiNN\Pca\Http;
-use RobiNN\Pca\Template;
 
 final class HelpersTest extends TestCase {
-    private Template $template;
-
-    protected function setUp(): void {
-        $this->template = new Template();
-    }
-
     public function testConvertTypesToString(): void {
         $input = [
             'string'       => 'value',
@@ -55,18 +48,26 @@ final class HelpersTest extends TestCase {
         $this->assertSame($expected, Helpers::convertTypesToString($input));
     }
 
-    public function testMixedToStringWithDifferentTypes(): void {
-        $this->assertSame('Hello, world!', Helpers::mixedToString('Hello, world!'));
-        $this->assertSame('123', Helpers::mixedToString(123));
-        $this->assertSame('1', Helpers::mixedToString(true));
-        $this->assertSame('', Helpers::mixedToString(false));
-        $this->assertSame('', Helpers::mixedToString(null));
+    /**
+     * @return Iterator<string, array{0: string, 1: mixed}>
+     */
+    public static function mixedToStringProvider(): Iterator {
+        yield 'string' => ['Hello, world!', 'Hello, world!'];
+        yield 'int' => ['123', 123];
+        yield 'true' => ['1', true];
+        yield 'false' => ['', false];
+        yield 'null' => ['', null];
 
         $array = ['a' => 1, 'b' => 2];
-        $this->assertSame(serialize($array), Helpers::mixedToString($array));
+        yield 'array' => [serialize($array), $array];
 
         $object = (object) ['name' => 'John', 'age' => 30];
-        $this->assertSame(serialize($object), Helpers::mixedToString($object));
+        yield 'object' => [serialize($object), $object];
+    }
+
+    #[DataProvider('mixedToStringProvider')]
+    public function testMixedToString(string $expected, mixed $value): void {
+        $this->assertSame($expected, Helpers::mixedToString($value));
     }
 
     /**
@@ -90,11 +91,14 @@ final class HelpersTest extends TestCase {
 
         Http::stopRedirect();
 
-        Helpers::import(
+        $result = Helpers::import(
             static fn ($key): false => false,
-            static function (string $key, string $value, int $ttl) use (&$stored): void {
+            static function (string $key, string $value, int $ttl) use (&$stored): bool {
                 $stored[] = ['key' => $key, 'value' => $value, 'ttl' => $ttl];
-            }
+
+                return true;
+            },
+            true
         );
 
         unlink($_FILES['import']['tmp_name']);
@@ -102,6 +106,62 @@ final class HelpersTest extends TestCase {
         $this->assertSame('testkey1', $stored[0]['key']);
         $this->assertSame('value1', $stored[0]['value']);
         $this->assertSame(3600, $stored[0]['ttl']);
+        $this->assertSame(['imported' => 2, 'skipped' => 0, 'failed' => 0, 'error' => null], $result);
+    }
+
+    /**
+     * @throws JsonException
+     */
+    public function testImportCounts(): void {
+        $_FILES['import'] = ['name' => 'test.json', 'type' => 'application/json', 'tmp_name' => __DIR__.'/test.json', 'error' => 0, 'size' => 1];
+
+        file_put_contents($_FILES['import']['tmp_name'], json_encode([
+            ['key' => 'existing', 'value' => 'v', 'ttl' => 0],
+            ['key' => 'new', 'value' => 'v', 'ttl' => 0],
+            ['key' => 'broken', 'value' => 'v', 'ttl' => 0],
+            ['key' => 'missing-value', 'ttl' => 0],
+        ], JSON_THROW_ON_ERROR));
+
+        $result = Helpers::import(
+            static fn (string $key): bool => $key === 'existing',
+            static fn (string $key): bool => $key !== 'broken',
+            true
+        );
+
+        unlink($_FILES['import']['tmp_name']);
+
+        $this->assertSame(['imported' => 1, 'skipped' => 1, 'failed' => 2, 'error' => null], $result);
+    }
+
+    /**
+     * @return Iterator<string, array{0: string, 1: string}>
+     */
+    public static function invalidImportProvider(): Iterator {
+        yield 'invalid json' => ['{not json', 'The file is not valid JSON'];
+        yield 'object instead of list' => ['{"key": "a", "value": "b", "ttl": 0}', 'The file does not contain a list of keys.'];
+        yield 'scalar' => ['"text"', 'The file does not contain a list of keys.'];
+    }
+
+    #[DataProvider('invalidImportProvider')]
+    public function testImportInvalidFile(string $content, string $error): void {
+        $_FILES['import'] = ['name' => 'test.json', 'type' => 'application/json', 'tmp_name' => __DIR__.'/test.json', 'error' => 0, 'size' => 1];
+
+        file_put_contents($_FILES['import']['tmp_name'], $content);
+
+        $result = Helpers::import(static fn (): bool => false, static fn (): bool => true, true);
+
+        unlink($_FILES['import']['tmp_name']);
+
+        $this->assertStringStartsWith($error, (string) $result['error']);
+        $this->assertSame(0, $result['imported']);
+    }
+
+    public function testImportWithoutFile(): void {
+        unset($_FILES['import']);
+
+        $result = Helpers::import(static fn (): bool => false, static fn (): bool => true, true);
+
+        $this->assertSame('No file was uploaded.', $result['error']);
     }
 
     /**
@@ -132,9 +192,12 @@ final class HelpersTest extends TestCase {
         $_GET['sortdir'] = $sortdir;
         $_GET['sortcol'] = $sortcol;
 
-        $this->assertSame($expected, Helpers::sortKeys($this->template, $keys));
+        $this->assertSame($expected, Helpers::sortKeys($keys));
     }
 
+    /**
+     * @return Iterator<array<array<int, mixed>, mixed>>
+     */
     public static function sortKeysProvider(): Iterator {
         yield 'no sorting' => [
             'none',
@@ -168,120 +231,171 @@ final class HelpersTest extends TestCase {
         ];
     }
 
+    public function testAlertEscapesHtmlInMessage(): void {
+        $alert = Helpers::alert('Key "<script>alert(1)</script>" has been deleted.', 'success');
+
+        $this->assertStringNotContainsString('<script>', $alert);
+        $this->assertStringContainsString('&lt;script&gt;', $alert);
+    }
+
+    public function testPanelsEscapesHtmlInError(): void {
+        $panels = Helpers::panels(['error' => 'Connection to <script>alert(1)</script> failed.']);
+
+        $this->assertStringNotContainsString('<script>', $panels);
+        $this->assertStringContainsString('&lt;script&gt;', $panels);
+    }
+
+    public function testSortKeysWithUnknownColumnKeepsOrder(): void {
+        $_GET['sortdir'] = 'asc';
+        $_GET['sortcol'] = 'missing';
+
+        $keys = [['info' => ['column1' => 'b']], ['info' => ['column1' => 'a']]];
+
+        $this->assertSame($keys, Helpers::sortKeys($keys));
+    }
+
     public function testCountChildren(): void {
         $tree = [
             [
                 'type'     => 'folder',
                 'children' => [
-                    ['type' => 'file', 'info' => ['bytes_size' => 100]],
-                    ['type' => 'file', 'info' => ['bytes_size' => 200]],
+                    ['type' => 'file'],
+                    ['type' => 'file'],
                     [
                         'type'     => 'folder',
-                        'children' => [
-                            ['type' => 'file', 'info' => ['bytes_size' => 300]],
-                            ['type' => 'file', 'info' => ['bytes_size' => 400]],
-                        ],
+                        'children' => [['type' => 'file'], ['type' => 'file'],],
                     ],
                 ],
             ],
-            ['type' => 'file', 'info' => ['bytes_size' => 500]],
-            ['type' => 'file', 'info' => ['bytes_size' => 600]],
+            ['type' => 'file'],
+            ['type' => 'file'],
         ];
 
         $expected = [
             [
                 'type'     => 'folder',
                 'children' => [
-                    ['type' => 'file', 'info' => ['bytes_size' => 100]],
-                    ['type' => 'file', 'info' => ['bytes_size' => 200]],
+                    ['type' => 'file'],
+                    ['type' => 'file'],
                     [
-                        'type' => 'folder',
-
-                        'children' => [
-                            ['type' => 'file', 'info' => ['bytes_size' => 300]],
-                            ['type' => 'file', 'info' => ['bytes_size' => 400]],
-                        ],
+                        'type'     => 'folder',
+                        'children' => [['type' => 'file'], ['type' => 'file'],],
                         'count'    => 2,
-                        'size'     => 700,
                     ],
                 ],
                 'count'    => 4,
-                'size'     => 1000,
             ],
-            ['type' => 'file', 'info' => ['bytes_size' => 500]],
-            ['type' => 'file', 'info' => ['bytes_size' => 600]],
+            ['type' => 'file'],
+            ['type' => 'file'],
         ];
 
-        $result = Helpers::calculateStats($tree);
-        $this->assertSame(['count' => 6, 'size' => 2100], $result);
+        $count = Helpers::countChildren($tree);
+        $this->assertSame(6, $count);
         $this->assertSame($expected, $tree);
     }
 
     public function testCountChildrenEmpty(): void {
         $tree = [];
-        $result = Helpers::calculateStats($tree);
-        $this->assertSame(['count' => 0, 'size' => 0], $result);
+        $count = Helpers::countChildren($tree);
+        $this->assertSame(0, $count);
     }
 
     public function testCountChildrenNoFolders(): void {
-        $tree = [
-            ['type' => 'file', 'info' => ['bytes_size' => 100]],
-            ['type' => 'file', 'info' => ['bytes_size' => 200]],
-            ['type' => 'file', 'info' => ['bytes_size' => 300]],
-        ];
-        $result = Helpers::calculateStats($tree);
-        $this->assertSame(['count' => 3, 'size' => 600], $result);
+        $tree = [['type' => 'file'], ['type' => 'file'], ['type' => 'file'],];
+        $count = Helpers::countChildren($tree);
+        $this->assertSame(3, $count);
     }
 
     public function testSnakeCase(): void {
         $this->assertSame('test_name_22', Helpers::snakeCase('Test name (22)'));
     }
 
-    /**
-     * @param bool $expected Resultado esperado.
-     * @param string $key La clave a comprobar.
-     * @param string $pattern El patrón de búsqueda.
-     */
     #[DataProvider('matchSearchPatternProvider')]
     public function testMatchSearchPattern(bool $expected, string $key, string $pattern): void {
         $this->assertSame($expected, Helpers::matchSearchPattern($key, $pattern));
     }
 
     public static function matchSearchPatternProvider(): Iterator {
-        // Patrón vacío y comodín total
         yield 'empty pattern matches all' => [true, 'user:123', ''];
         yield 'asterisk matches all' => [true, 'user:123', '*'];
         yield 'asterisk matches empty key' => [true, '', '*'];
-
-        // Búsqueda sin comodines (subcadena, case-insensitive)
         yield 'substring match' => [true, 'user:123', 'user'];
         yield 'substring match middle' => [true, 'user:123:active', '123'];
         yield 'substring match case-insensitive' => [true, 'USER:123', 'user'];
         yield 'substring no match' => [false, 'user:123', 'admin'];
-
-        // Búsqueda con asterisco (*)
+        yield 'empty key with substring pattern' => [false, '', 'user'];
         yield 'asterisk prefix match' => [true, 'user:123', 'user:*'];
         yield 'asterisk suffix match' => [true, 'user:123', '*:123'];
         yield 'asterisk middle match' => [true, 'user:123:active', 'user:*:active'];
         yield 'asterisk prefix no match' => [false, 'admin:123', 'user:*'];
+        yield 'asterisk anchors the whole key' => [false, 'xuser:123', 'user:*'];
         yield 'multiple asterisks match' => [true, 'user:123:session:abc', 'user:*:session:*'];
         yield 'asterisk case-insensitive' => [true, 'USER:123', 'user:*'];
-
-        // Búsqueda con porcentaje (%)
         yield 'percent prefix match' => [true, 'user:123', 'user:%'];
-        yield 'percent suffix match' => [true, 'user:123', '%:123'];
         yield 'percent middle match' => [true, 'user:123:active', 'user:%:active'];
         yield 'percent prefix no match' => [false, 'admin:123', 'user:%'];
-        yield 'multiple percents match' => [true, 'user:123:session:abc', 'user:%:session:%'];
-
-        // Comodines mezclados
-        yield 'mixed wildcards match' => [true, 'user:123:active', 'user:*:active'];
         yield 'asterisk and percent match' => [true, 'user:123:active', 'user:%:*'];
+        yield 'regex characters are literal' => [true, 'a.b(c):1', 'a.b(c):*'];
+        yield 'regex characters do not match others' => [false, 'axb(c):1', 'a.b(c):*'];
+        yield 'multiline key' => [true, "user:1\n2", 'user:*'];
+    }
 
-        // Casos límite
-        yield 'exact match with asterisk pattern' => [true, 'user', 'user'];
-        yield 'empty key with empty pattern' => [true, '', ''];
-        yield 'empty key with substring pattern' => [false, '', 'user'];
-        yield 'asterisk only in key' => [true, 'user:*:test', 'user:*:test'];
+    public function testNamespaceStats(): void {
+        $keys = [
+            'user:1'          => 100,
+            'user:2'          => 100,
+            'user:1:settings' => 200,
+            'league:5'        => 50,
+            'solo'            => 50,
+        ];
+
+        $stats = Helpers::namespaceStats($keys, '', ':');
+
+        $this->assertSame(1, $stats['direct_keys_count']);
+        $this->assertSame(50, $stats['direct_keys_size']);
+        $this->assertSame(10.0, $stats['direct_keys_percentage']);
+        $this->assertSame(['solo'], $stats['direct_keys_names']);
+        $this->assertSame(['page' => 1, 'per_page' => 100, 'total' => 2, 'total_pages' => 1], $stats['pagination']);
+
+        // Sorted by size, biggest first.
+        [$user, $league] = $stats['namespaces'];
+        $this->assertSame(['user', 'user', 3, 400, 80.0, true, 2, ['1', '2']], [
+            $user['name'], $user['path'], $user['count'], $user['size'], $user['percentage'], $user['has_children'], $user['direct_keys'], $user['direct_keys_names'],
+        ]);
+        $this->assertSame(['league', false, 1], [$league['path'], $league['has_children'], $league['direct_keys']]);
+    }
+
+    public function testNamespaceStatsWithPrefix(): void {
+        $keys = [
+            'user:1'          => 100,
+            'user:1:settings' => 200,
+            'user:1:a:b'      => 10,
+        ];
+
+        $stats = Helpers::namespaceStats($keys, 'user', ':');
+
+        $this->assertSame(1, $stats['direct_keys_count']);
+        $this->assertSame(['1'], $stats['direct_keys_names']);
+        $this->assertCount(1, $stats['namespaces']);
+        $this->assertSame('user:1', $stats['namespaces'][0]['path']);
+        $this->assertSame(2, $stats['namespaces'][0]['count']);
+        $this->assertTrue($stats['namespaces'][0]['has_children']);
+    }
+
+    public function testNamespaceStatsPagination(): void {
+        $keys = [];
+
+        for ($i = 0; $i < 5; $i++) {
+            $keys['ns'.$i.':key'] = 10 * ($i + 1);
+        }
+
+        $stats = Helpers::namespaceStats($keys, '', ':', 3, 2);
+
+        $this->assertSame(['page' => 3, 'per_page' => 2, 'total' => 5, 'total_pages' => 3], $stats['pagination']);
+        $this->assertSame(['ns0'], array_column($stats['namespaces'], 'path'));
+
+        // A page out of range falls back to the last one.
+        $this->assertSame(3, Helpers::namespaceStats($keys, '', ':', 99, 2)['pagination']['page']);
+        $this->assertSame(1, Helpers::namespaceStats([], '', ':', 5, 2)['pagination']['page']);
     }
 }

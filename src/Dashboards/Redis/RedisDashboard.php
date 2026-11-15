@@ -11,10 +11,12 @@ namespace RobiNN\Pca\Dashboards\Redis;
 use Exception;
 use Predis\Client as Predis;
 use RobiNN\Pca\Config;
+use RobiNN\Pca\Csrf;
 use RobiNN\Pca\Dashboards\DashboardException;
 use RobiNN\Pca\Dashboards\DashboardInterface;
 use RobiNN\Pca\Helpers;
 use RobiNN\Pca\Http;
+use RobiNN\Pca\ReadonlyMode;
 use RobiNN\Pca\Template;
 
 class RedisDashboard implements DashboardInterface {
@@ -33,9 +35,22 @@ class RedisDashboard implements DashboardInterface {
 
     public bool $is_cluster = false;
 
+    public bool $is_sentinel = false;
+
+    public string $sentinel_master = '';
+
     public function __construct(private readonly Template $template, ?string $client = null) {
-        $this->client = $client ?? (extension_loaded('redis') ? 'redis' : 'predis');
+        $this->client = $client ?? Config::get('redisoptions.client', 'redis');
+
+        if ($this->client !== 'predis' && !extension_loaded('redis')) {
+            $this->client = 'predis';
+        }
+
         $this->servers = Config::get('redis', []);
+
+        if (ReadonlyMode::enabled() || !$this->consoleEnabled()) {
+            unset($this->tabs['console']);
+        }
 
         $server = Http::get('server', 0);
 
@@ -78,9 +93,14 @@ class RedisDashboard implements DashboardInterface {
      */
     public function connect(array $server): Compatibility\Redis|Compatibility\Predis|Compatibility\Cluster\RedisCluster|Compatibility\Cluster\PredisCluster {
         $server['database'] = Http::get('db', $server['database'] ?? 0);
+        $server = $this->resolvePassword($server);
 
-        if (!empty($server['authfile'])) {
-            $server['password'] = trim(file_get_contents($server['authfile']));
+        if (Compatibility\Sentinel::isConfigured($server)) {
+            $master = (new Compatibility\Sentinel($server, $this->client))->masterAddress();
+            $server = array_merge($server, $master);
+
+            $this->is_sentinel = true;
+            $this->sentinel_master = $master['host'].':'.$master['port'];
         }
 
         $this->is_cluster = !empty($server['nodes']) && is_array($server['nodes']);
@@ -96,6 +116,29 @@ class RedisDashboard implements DashboardInterface {
         return $redis;
     }
 
+    /**
+     * @param array<string, mixed> $server
+     *
+     * @return array<string, mixed>
+     *
+     * @throws DashboardException
+     */
+    private function resolvePassword(array $server): array {
+        if (empty($server['authfile'])) {
+            return $server;
+        }
+
+        $password = is_readable($server['authfile']) ? file_get_contents($server['authfile']) : false;
+
+        if ($password === false) {
+            throw new DashboardException(sprintf('Unable to read the password file "%s".', $server['authfile']));
+        }
+
+        $server['password'] = trim($password);
+
+        return $server;
+    }
+
     public function ajax(): string {
         try {
             $this->redis = $this->connect($this->servers[$this->current_server]);
@@ -105,91 +148,71 @@ class RedisDashboard implements DashboardInterface {
             }
 
             if (isset($_GET['metrics'])) {
-                return (new RedisMetrics($this->redis, $this->template, $this->servers, $this->current_server))->collectAndRespond();
+                return (new RedisMetrics($this->redis, $this->servers, $this->current_server))->collectAndRespond();
+            }
+
+            if (isset($_GET['pubsub'])) {
+                return $this->pubSubAjax();
+            }
+
+            if (isset($_GET['profiler'])) {
+                return $this->profilerAjax();
+            }
+
+            if (isset($_GET['console'])) {
+                return $this->consoleAjax();
+            }
+
+            if (isset($_GET['view'], $_GET['key'])) {
+                return $this->viewKey();
             }
 
             if (isset($_GET['namespaces'])) {
-                return $this->getNamespacesJson(Http::get('namespaces', ''));
+                return $this->template->render('partials/namespace_items', $this->keysNamespaceView((string) Http::get('namespaces', '', true)));
+            }
+
+            if (isset($_GET['deletenamespace'])) {
+                if (!Csrf::validateToken(Http::post('csrf_token', ''))) {
+                    return Helpers::alert('Invalid CSRF token.', 'error');
+                }
+
+                $namespace = Helpers::namespaceFromPost();
+
+                return $namespace !== '' ? $this->deleteNamespace($namespace) : Helpers::alert('No namespace is selected.');
             }
 
             if (isset($_GET['deleteall'])) {
+                if (!Csrf::validateToken(Http::post('csrf_token', ''))) {
+                    return Helpers::alert('Invalid CSRF token.', 'error');
+                }
+
                 return $this->deleteAllKeys();
             }
 
             if (isset($_GET['delete'])) {
-                return Helpers::deleteKey($this->template, function (string $key): bool {
+                if (!Csrf::validateToken(Http::post('csrf_token', ''))) {
+                    return Helpers::alert('Invalid CSRF token.', 'error');
+                }
+
+                return Helpers::deleteKey(function (string $key): bool {
                     $delete_key = $this->redis->del($key);
 
                     return is_int($delete_key) && $delete_key > 0;
-                }, true);
-            }
-
-            if (isset($_GET['deletenamespace'])) {
-                return $this->deleteNamespace(Http::get('deletenamespace', ''));
+                });
             }
         } catch (DashboardException|Exception $e) {
-            return $e->getMessage();
+            if (isset($_GET['panels']) || isset($_GET['metrics'])) {
+                if (!headers_sent()) {
+                    header('Content-Type: application/json');
+                }
+
+                return Helpers::ajaxJson(['error' => $e->getMessage()]);
+            }
+
+            return Helpers::alert($e->getMessage(), 'error');
         }
 
         return '';
-    }
-
-    /**
-     * Returns child namespaces in JSON format.
-     *
-     * @throws Exception
-     */
-    private function getNamespacesJson(string $prefix): string {
-        header('Content-Type: application/json');
-
-        $page = (int) Http::get('nspage', 1);
-        $per_page = (int) Http::get('nspp', Config::get('nsperpage', 100));
-        $result = $this->keysNamespaceView($prefix, $page, $per_page);
-
-        try {
-            return json_encode($result, JSON_THROW_ON_ERROR);
-        } catch (\JsonException $e) {
-            return (string) json_encode(['error' => $e->getMessage()]);
-        }
-    }
-
-    /**
-     * Deletes all keys from a namespace.
-     *
-     * @throws Exception
-     */
-    private function deleteNamespace(string $namespace): string {
-        $separator = $this->servers[$this->current_server]['separator'] ?? ':';
-        $pattern = $namespace.$separator.'*';
-        $deleted = 0;
-
-        if (isset($this->servers[$this->current_server]['scansize']) || !$this->isCommandSupported('KEYS')) {
-            $scansize = (int) ($this->servers[$this->current_server]['scansize'] ?? 1000);
-            $cursor = null;
-
-            do {
-                $keys = $this->redis->scanKeysWithCursor($pattern, $scansize, $cursor);
-
-                foreach ($keys['keys'] as $key) {
-                    $result = $this->redis->del($key);
-                    if (is_int($result) && $result > 0) {
-                        $deleted++;
-                    }
-                }
-
-                $cursor = $keys['cursor'];
-            } while ($cursor !== 0 && $cursor !== '0');
-        } else {
-            $keys = $this->redis->keys($pattern);
-            foreach ($keys as $key) {
-                $result = $this->redis->del($key);
-                if (is_int($result) && $result > 0) {
-                    $deleted++;
-                }
-            }
-        }
-
-        return Helpers::alert($this->template, sprintf('Deleted %d keys from namespace "%s".', $deleted, $namespace), 'success');
     }
 
     public function dashboard(): string {
@@ -197,29 +220,27 @@ class RedisDashboard implements DashboardInterface {
             return 'No servers';
         }
 
-        $this->template->addGlobal('servers', Helpers::serverSelector($this->template, $this->servers, $this->current_server));
+        $this->template->addGlobal('servers', Helpers::serverSelector($this->servers, $this->current_server));
 
         try {
             $this->redis = $this->connect($this->servers[$this->current_server]);
             $this->template->addGlobal('ajax_panels', true);
-            $panels = $this->template->render('partials/info', ['panels' => $this->getPanelsData()]);
+            $panels = Helpers::panels($this->getPanelsData());
             $this->template->addGlobal('side', $this->dbSelect().$panels);
 
-            if (isset($_GET['moreinfo'])) {
-                return $this->moreInfo();
-            }
+            $tabs = $this->template->render('components/tabs', ['links' => $this->tabs, 'main' => true,]);
 
             if (isset($_GET['view'], $_GET['key'])) {
-                return $this->viewKey();
+                return $tabs.$this->viewKey();
             }
 
             if (isset($_GET['form'])) {
-                return $this->form();
+                return $tabs.$this->form();
             }
 
-            return $this->mainDashboard();
+            return $tabs.$this->mainDashboard();
         } catch (DashboardException|Exception $e) {
-            return $e->getMessage();
+            return $this->template->render('components/alert', ['message' => htmlspecialchars($e->getMessage()), 'alert_color' => 'error', 'inline' => true]);
         }
     }
 }

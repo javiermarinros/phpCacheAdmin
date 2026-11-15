@@ -11,7 +11,7 @@ namespace RobiNN\Pca;
 use RobiNN\Pca\Dashboards\DashboardInterface;
 
 class Admin {
-    public const VERSION = '2.4.1';
+    public const VERSION = '2.7.4';
 
     private readonly Template $template;
 
@@ -42,7 +42,13 @@ class Admin {
         return array_key_exists($current, $this->dashboards) ? $current : array_key_first($this->dashboards);
     }
 
-    public function render(bool $auth): string {
+    public function render(): string {
+        Http::securityHeaders();
+
+        if ($this->dashboards === []) {
+            return 'No dashboards are available. Enable at least one dashboard in the configuration ("dashboards" option).';
+        }
+
         $nav = array_map(static fn (DashboardInterface $d_dashboard): array => $d_dashboard->dashboardInfo(), $this->dashboards);
 
         $current = $this->currentDashboard();
@@ -51,7 +57,22 @@ class Admin {
 
         $this->template->addGlobal('current', $current);
 
+        $applies = (bool) ($info['readonly'] ?? true);
+        $this->template->addGlobal('readonly', ReadonlyMode::blocks($applies));
+
+        if (($blocked = ReadonlyMode::guard($applies)) !== null) {
+            return $blocked;
+        }
+
         if (isset($_GET['ajax'])) {
+            if (isset($_GET['authsetup'])) { // Not a dashboard action, the notice is a part of the layout.
+                return AuthSetup::handle();
+            }
+
+            if (isset($_GET['settings']) && Settings::isEnabled()) {
+                return Settings::handle($this->dashboards);
+            }
+
             return $dashboard->ajax();
         }
 
@@ -64,13 +85,17 @@ class Admin {
         }
 
         return $this->template->render('layout', [
-            'colors'     => $colors,
-            'site_title' => $info['title'],
-            'nav'        => $nav,
-            'logout_url' => $auth ? Http::queryString([], ['logout' => 'yes']) : null,
-            'version'    => self::VERSION,
-            'repo'       => 'https://github.com/RobiNN1/phpCacheAdmin',
-            'dashboard'  => $dashboard->dashboard(),
+            'colors'       => $colors,
+            'site_title'   => $info['title'],
+            'nav'          => $nav,
+            'logout_url'   => Auth::isEnabled() ? Http::queryString() : null,
+            'logout_user'  => Auth::user(),
+            'auth_warning' => Auth::showWarning(),
+            'auth_setup'   => AuthSetup::isAllowed(),
+            'settings'     => Settings::isEnabled() ? Settings::view() : null,
+            'version'      => self::VERSION,
+            'repo'         => 'https://github.com/RobiNN1/phpCacheAdmin',
+            'dashboard'    => $dashboard->dashboard(),
         ]);
     }
 }

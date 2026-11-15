@@ -8,21 +8,25 @@ declare(strict_types=1);
 
 namespace RobiNN\Pca\Dashboards\Realpath;
 
+use RobiNN\Pca\Csrf;
+use RobiNN\Pca\Dashboards\DashboardException;
 use RobiNN\Pca\Dashboards\DashboardInterface;
+use RobiNN\Pca\Dashboards\RemoteServersTrait;
 use RobiNN\Pca\Helpers;
-use RobiNN\Pca\Paginator;
+use RobiNN\Pca\Http;
 use RobiNN\Pca\Template;
 
 class RealpathDashboard implements DashboardInterface {
     use RealpathTrait;
+    use RemoteServersTrait;
 
     /**
      * @var array<string, mixed>
-     * @noinspection PhpPrivateFieldCanBeLocalVariableInspection
      */
     private array $all_keys = [];
 
     public function __construct(private readonly Template $template) {
+        $this->initServers(true);
     }
 
     public static function check(): bool {
@@ -30,13 +34,14 @@ class RealpathDashboard implements DashboardInterface {
     }
 
     /**
-     * @return array<string, array<int, string>|string>
+     * @return array<string, array<int, string>|bool|string>
      */
     public function dashboardInfo(): array {
         return [
-            'key'    => 'realpath',
-            'title'  => 'Realpath',
-            'colors' => [
+            'key'      => 'realpath',
+            'title'    => 'Realpath',
+            'readonly' => false,
+            'colors'   => [
                 50  => '#f4f6fa',
                 100 => '#e6ebf3',
                 200 => '#d2dbeb',
@@ -53,27 +58,38 @@ class RealpathDashboard implements DashboardInterface {
     }
 
     public function ajax(): string {
+        if (isset($_GET['deleteall']) && $this->isRemote()) {
+            return $this->remoteActionError();
+        }
+
         if (isset($_GET['deleteall'])) {
+            if (!Csrf::validateToken(Http::post('csrf_token', ''))) {
+                return Helpers::alert('Invalid CSRF token.', 'error');
+            }
+
             clearstatcache(true);
 
-            return Helpers::alert($this->template, 'Cache has been cleaned.', 'success');
+            return Helpers::alert('Cache has been cleaned.', 'success');
         }
 
         return '';
     }
 
     public function dashboard(): string {
-        $this->all_keys = realpath_cache_get();
+        $this->serversGlobals();
+
+        try {
+            $this->loadRemote('realpath');
+        } catch (DashboardException $e) {
+            return $this->errorAlert($e);
+        }
+
+        $this->all_keys = $this->cacheInfo()['entries'];
 
         $this->template->addGlobal('side', $this->panels());
 
-        $keys = $this->getAllKeys();
-        $paginator = new Paginator($this->template, $keys);
+        $tabs = $this->template->render('components/tabs', ['links' => $this->tabs, 'main' => true]);
 
-        return $this->template->render('dashboards/realpath', [
-            'keys'      => $paginator->getPaginated(),
-            'all_keys'  => count($this->all_keys),
-            'paginator' => $paginator->render(),
-        ]);
+        return $tabs.$this->mainDashboard();
     }
 }

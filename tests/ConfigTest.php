@@ -8,14 +8,51 @@ declare(strict_types=1);
 
 namespace Tests;
 
+use Dotenv\Dotenv;
+use Iterator;
 use JsonException;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use RobiNN\Pca\Config;
 
 final class ConfigTest extends TestCase {
+    /**
+     * @var array<string, string|false>
+     */
+    private array $env_backup = [];
+
+    private ?string $config_file = null;
+
     protected function tearDown(): void {
         parent::tearDown();
+
+        foreach ($this->env_backup as $name => $value) {
+            putenv($value === false ? $name : $name.'='.$value);
+        }
+
+        $this->env_backup = [];
+
+        if ($this->config_file !== null && is_file($this->config_file)) {
+            unlink($this->config_file);
+            $this->config_file = null;
+        }
+
         Config::reset();
+    }
+
+    private function setEnv(string $name, string $value): void {
+        if (!array_key_exists($name, $this->env_backup)) {
+            $this->env_backup[$name] = getenv($name);
+        }
+
+        putenv($name.'='.$value);
+    }
+
+    private function setConfig(string $php_array): void {
+        $this->config_file = tempnam(sys_get_temp_dir(), 'pca_cfg');
+        file_put_contents($this->config_file, '<?php return '.$php_array.';');
+        Config::reset();
+        Config::setConfigPath($this->config_file);
     }
 
     public function testGetter(): void {
@@ -25,22 +62,52 @@ final class ConfigTest extends TestCase {
         $this->assertSame('d. m. Y H:i:s', Config::get('timeformat', ''));
     }
 
+    public function testDotNotation(): void {
+        $this->assertSame(':', Config::get('apcu.separator'));
+        $this->assertSame(5, Config::get('redisoptions.pubsubwindow'));
+    }
+
+    public function testDotNotationDeeperThanOneLevel(): void {
+        $this->assertSame('127.0.0.1', Config::get('redis.0.host'));
+    }
+
+    public function testDotNotationFallsBackToDefault(): void {
+        $this->assertSame('fallback', Config::get('redisoptions.nonexistent', 'fallback')); // Missing option.
+        $this->assertSame('fallback', Config::get('nonexistent.option', 'fallback')); // Missing group.
+        $this->assertSame('fallback', Config::get('timeformat.option', 'fallback')); // The group is a scalar.
+    }
+
+    public function testKeyWithADotWinsOverTraversal(): void {
+        $this->setConfig("['apcu.separator' => 'top-level', 'apcu' => ['separator' => '#']]");
+
+        $this->assertSame('top-level', Config::get('apcu.separator'));
+        $this->assertSame('#', Config::get('apcu', [])['separator'] ?? null); // The group itself is untouched.
+    }
+
+    public function testDotNotationReadsEnvValues(): void {
+        $this->setEnv('PCA_APCU_SEPARATOR', '#');
+        $this->setEnv('PCA_REDIS_0_PORT', '6380');
+
+        $this->assertSame('#', Config::get('apcu.separator'));
+        $this->assertSame(6380, Config::get('redis.0.port'));
+    }
+
     /**
      * @throws JsonException
      */
     public function testEnvGetter(): void {
-        putenv('PCA_TESTENV-ARRAY='.json_encode(['item1' => 'value1', 'item2' => 'value2'], JSON_THROW_ON_ERROR));
+        $this->setEnv('PCA_TESTENV-ARRAY', json_encode(['item1' => 'value1', 'item2' => 'value2'], JSON_THROW_ON_ERROR));
         $this->assertSame('value1', Config::get('testenv-array', [])['item1']);
     }
 
     public function testEnvInt(): void {
-        putenv('PCA_TESTENV-INT=10');
+        $this->setEnv('PCA_TESTENV-INT', '10');
 
         $this->assertSame(10, Config::get('testenv-int', 2));
     }
 
     public function testEnvArray(): void {
-        putenv('PCA_TESTENV-JSON={"local_cert":"path/to/redis.crt","local_pk":"path/to/redis.key","cafile":"path/to/ca.crt","verify_peer_name":false}');
+        $this->setEnv('PCA_TESTENV-JSON', '{"local_cert":"path/to/redis.crt","local_pk":"path/to/redis.key","cafile":"path/to/ca.crt","verify_peer_name":false}');
         $this->assertEqualsCanonicalizing([
             'local_cert'       => 'path/to/redis.crt',
             'local_pk'         => 'path/to/redis.key',
@@ -55,16 +122,16 @@ final class ConfigTest extends TestCase {
 
         Config::reset();
 
-        putenv('PCA_TIMEFORMAT=d. m. Y');
+        $this->setEnv('PCA_TIMEFORMAT', 'd. m. Y');
 
         $this->assertSame('d. m. Y', Config::get('timeformat', ''));
     }
 
     public function testEnvNested(): void {
-        putenv('PCA_REDIS_0_HOST=127.0.0.1');
-        putenv('PCA_REDIS_0_PORT=6379');
-        putenv('PCA_REDIS_2_HOST=localhost');
-        putenv('PCA_REDIS_2_PORT=6380');
+        $this->setEnv('PCA_REDIS_0_HOST', '127.0.0.1');
+        $this->setEnv('PCA_REDIS_0_PORT', '6379');
+        $this->setEnv('PCA_REDIS_2_HOST', 'localhost');
+        $this->setEnv('PCA_REDIS_2_PORT', '6380');
 
         $redis_config = Config::get('redis', []);
 
@@ -75,17 +142,131 @@ final class ConfigTest extends TestCase {
         $this->assertSame(6380, $redis_config[2]['port'] ?? null);
     }
 
+    public function testEnvNestedForDashboardsWithoutServers(): void {
+        $this->setEnv('PCA_APCU_SEPARATOR', '#');
+        $this->setEnv('PCA_OPCACHE_WARMUPPATHS', '["/srv/app","/srv/lib"]');
+
+        $this->assertSame('#', Config::get('apcu', [])['separator'] ?? null);
+        $this->assertSame(['/srv/app', '/srv/lib'], Config::get('opcache', [])['warmuppaths'] ?? null);
+    }
+
+    public function testGroupNameWithoutUnderscoreStaysTopLevel(): void {
+        // "redisoptions" starts with the "redis" group name but has nothing to nest, it must not end up in the server list.
+        $this->setEnv('PCA_REDISOPTIONS', '{"client":"predis"}');
+
+        $this->assertSame('predis', Config::get('redisoptions.client'));
+        $this->assertArrayNotHasKey('client', Config::get('redis', []));
+    }
+
     public function testEnvCollisionWithScalar(): void {
-        putenv('PCA_TIMEFORMAT=d. m. Y H:i:s');
-        putenv('PCA_TIMEFORMAT_EXTRA=test');
+        $this->setEnv('PCA_TIMEFORMAT', 'd. m. Y H:i:s');
+        $this->setEnv('PCA_TIMEFORMAT_EXTRA', 'test');
 
         $this->assertSame('d. m. Y H:i:s', Config::get('timeformat', ''));
         $this->assertSame('test', Config::get('timeformat_extra'));
     }
 
     public function testEnvSnakeCase(): void {
-        putenv('PCA_SOME_SNAKE_CASE_KEY=value');
+        $this->setEnv('PCA_SOME_SNAKE_CASE_KEY', 'value');
 
         $this->assertSame('value', Config::get('some_snake_case_key'));
+    }
+
+    public function testDotenvLoading(): void {
+        if (!class_exists(Dotenv::class)) {
+            $this->markTestSkipped('vlucas/phpdotenv is not installed.');
+        }
+
+        $dir = sys_get_temp_dir().'/pca_dotenv_'.uniqid('', true);
+        mkdir($dir);
+        file_put_contents($dir.'/.env', "PCA_DOTENV_TEST=from_env_file\n");
+
+        Config::loadDotenv($dir);
+
+        $env_value = getenv('PCA_DOTENV_TEST');
+        $config_value = Config::get('dotenv_test');
+
+        putenv('PCA_DOTENV_TEST');
+        unlink($dir.'/.env');
+        rmdir($dir);
+
+        $this->assertSame('from_env_file', $env_value);
+        $this->assertSame('from_env_file', $config_value);
+    }
+
+    public function testOnlyTheBaseDotenvFileIsRead(): void {
+        if (!class_exists(Dotenv::class)) {
+            $this->markTestSkipped('vlucas/phpdotenv is not installed.');
+        }
+
+        $dir = sys_get_temp_dir().'/pca_dotenv_'.uniqid('', true);
+        mkdir($dir);
+        file_put_contents($dir.'/.env', "PCA_DOTENV_LAYER=base\n");
+        file_put_contents($dir.'/.env.local', "PCA_DOTENV_LAYER=local\n");
+
+        Config::loadDotenv($dir);
+
+        $env_value = getenv('PCA_DOTENV_LAYER');
+
+        putenv('PCA_DOTENV_LAYER');
+        unlink($dir.'/.env');
+        unlink($dir.'/.env.local');
+        rmdir($dir);
+
+        $this->assertSame('base', $env_value); // .env.local and the rest are no longer read.
+    }
+
+    public function testRealEnvWinsOverDotenv(): void {
+        if (!class_exists(Dotenv::class)) {
+            $this->markTestSkipped('vlucas/phpdotenv is not installed.');
+        }
+
+        $dir = sys_get_temp_dir().'/pca_dotenv_'.uniqid('', true);
+        mkdir($dir);
+        file_put_contents($dir.'/.env', "PCA_DOTENV_PRECEDENCE=from_file\n");
+
+        putenv('PCA_DOTENV_PRECEDENCE=from_real_env');
+        Config::loadDotenv($dir);
+
+        $env_value = getenv('PCA_DOTENV_PRECEDENCE');
+
+        putenv('PCA_DOTENV_PRECEDENCE');
+        unlink($dir.'/.env');
+        rmdir($dir);
+
+        $this->assertSame('from_real_env', $env_value);
+    }
+
+    /**
+     * @return Iterator<string, array{0: string}>
+     */
+    public static function jsonLikeStringProvider(): Iterator {
+        yield 'digits' => ['123456'];
+        yield 'exponent' => ['1e5'];
+        yield 'null' => ['null'];
+        yield 'bool' => ['true'];
+        yield 'json string' => ['"quoted"'];
+        yield 'array' => ['[1,2]'];
+    }
+
+    #[DataProvider('jsonLikeStringProvider')]
+    public function testEnvStringOptionsAreNotDecoded(string $value): void {
+        $this->setEnv('PCA_REDIS_0_PASSWORD', $value);
+        $this->setEnv('PCA_REDIS_0_USERNAME', $value);
+        $this->setEnv('PCA_AUTHTOKEN', $value);
+
+        $this->assertSame($value, Config::get('redis')[0]['password']);
+        $this->assertSame($value, Config::get('redis')[0]['username']);
+        $this->assertSame($value, Config::get('authtoken'));
+    }
+
+    public function testEnvOtherOptionsAreStillDecoded(): void {
+        $this->setEnv('PCA_REDIS_0_PORT', '6380');
+        $this->setEnv('PCA_REDIS_0_SENTINELS', '["127.0.0.1:26379"]');
+        $this->setEnv('PCA_DEBUG', 'true');
+
+        $this->assertSame(6380, Config::get('redis')[0]['port']);
+        $this->assertSame(['127.0.0.1:26379'], Config::get('redis')[0]['sentinels']);
+        $this->assertTrue(Config::get('debug'));
     }
 }

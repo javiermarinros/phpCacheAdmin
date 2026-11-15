@@ -21,17 +21,16 @@ readonly class Paginator {
     private int $per_page;
 
     /**
-     * @param array<int, string|array<string, int|string>> $items
-     * @param array<int, array<int|string, string>>        $url
+     * @param array<int|string, mixed>              $items
+     * @param array<int, array<int|string, string>> $url
      */
     public function __construct(
-        private Template $template,
-        array            $items,
-        private array    $url = [['pp', 's'], ['p' => '']]
+        array         $items,
+        private array $url = [['pp', 's', 'view'], ['p' => '']]
     ) {
         $this->total = count($items);
-        $this->page = Http::get('p', 1);
-        $this->per_page = max(1, Http::get('pp', 50));
+        $this->page = max(1, Http::get('p', 1));
+        $this->per_page = min(1000, max(1, Http::get('pp', 50))); // this is intentionally limited to 1000
         $this->paginated = array_slice($items, $this->per_page * ($this->page - 1), $this->per_page, true);
     }
 
@@ -84,14 +83,16 @@ readonly class Paginator {
 
     public function render(): string {
         $on_page = $this->paginated !== [] ? 1 : 0;
-        /** @var list<int> $select */
-        $select = [50, 100, 200, 300, 400, 500];
-        if(in_array($this->per_page, $select) === false) {
+
+        /** @var array<int, int> $select */
+        $select = [50, 100, 200, 300, 400, 500, 1000];
+
+        if (!in_array($this->per_page, $select, true)) {
             $select[] = $this->per_page;
             sort($select);
         }
 
-        return $this->template->render('components/paginator', [
+        return Template::get()->render('components/paginator', [
             'first_on_page' => Format::number((int) array_key_first($this->paginated) + $on_page),
             'last_on_page'  => Format::number((int) array_key_last($this->paginated) + $on_page),
             'total'         => Format::number($this->total),

@@ -8,8 +8,13 @@ declare(strict_types=1);
 
 namespace RobiNN\Pca\Dashboards\Redis\Compatibility;
 
+use Exception;
 use Predis\Client;
 use Predis\Collection\Iterator\Keyspace;
+use Predis\Command\RawCommand;
+use Predis\Response\Status;
+use RuntimeException;
+use Throwable;
 
 /**
  * @method bool restore(string $key, int $ttl, string $value)
@@ -29,31 +34,36 @@ class Predis extends Client implements RedisCompatibilityInterface {
         'zset'      => 'zset',
         'hash'      => 'hash',
         'stream'    => 'stream',
-        'ReJSON-RL' => 'rejson',
+        'vectorset' => 'vectorset',
+        'ReJSON-RL' => 'json',
     ];
 
     /**
-     * @param array<string, int|string> $server
+     * @param array<string, mixed> $server
      */
-    public function __construct(array $server) {
-        if (isset($server['path'])) {
+    public function __construct(private array $server) {
+        if (isset($this->server['path'])) {
             $connect = [
                 'scheme' => 'unix',
-                'path'   => $server['path'],
+                'path'   => $this->server['path'],
             ];
         } else {
             $connect = [
-                'scheme' => $server['scheme'] ?? 'tcp',
-                'host'   => $server['host'],
-                'port'   => $server['port'] ??= 6379,
-                'ssl'    => $server['ssl'] ?? null,
+                'scheme' => $this->server['scheme'] ?? 'tcp',
+                'host'   => $this->server['host'],
+                'port'   => $this->server['port'] ??= 6379,
+                'ssl'    => $this->server['ssl'] ?? null,
             ];
         }
 
+        if (isset($this->server['read_write_timeout'])) {
+            $connect['read_write_timeout'] = $this->server['read_write_timeout'];
+        }
+
         parent::__construct($connect + [
-                'database' => $server['database'] ?? 0,
-                'username' => $server['username'] ?? null,
-                'password' => $server['password'] ?? null,
+                'database' => $this->server['database'] ?? 0,
+                'username' => $this->server['username'] ?? null,
+                'password' => $this->server['password'] ?? null,
             ]);
     }
 
@@ -71,81 +81,37 @@ class Predis extends Client implements RedisCompatibilityInterface {
      * @return array<int|string, mixed>
      */
     public function getInfo(?string $option = null): array {
-        static $info = null;
-
-        if ($info === null) {
-            $section_info = [];
-
-            foreach ($this->getInfoSections() as $section) {
-                $response = $this->info($section);
-
-                $section_data = (is_array($response) && $response !== []) ? reset($response) : null;
-
-                if ($section_data && is_array($section_data)) {
-                    if ($section === 'keyspace') {
-                        $reformatted_keyspace = [];
-
-                        foreach ($section_data as $db => $keys_data_array) {
-                            $key_value_pairs = [];
-
-                            if (is_array($keys_data_array)) {
-                                foreach ($keys_data_array as $key => $value) {
-                                    $key_value_pairs[] = $key.'='.$value;
-                                }
-                            }
-
-                            $reformatted_keyspace[$db] = implode(',', $key_value_pairs);
-                        }
-
-                        $section_data = $reformatted_keyspace;
-                    }
-
-                    $section_info[strtolower($section)] = $section_data;
-                }
+        if ($this->info_cache === null) {
+            try {
+                $this->info_cache = $this->parseInfoOutput((string) $this->executeRaw(['INFO', 'all']));
+            } catch (Exception) {
+                $this->info_cache = [];
             }
-
-            $info = $section_info;
         }
 
         if ($option !== null) {
-            return $info[strtolower($option)] ?? [];
+            return $this->info_cache[strtolower($option)] ?? [];
         }
 
-        return $info;
+        return $this->info_cache;
     }
 
     /**
      * @return array<int, string>
      */
-    public function scanKeys(string $pattern, int $count): array {
+    public function scanKeys(string $pattern, int $count, ?int $limit = null): array {
+        $limit ??= $count;
         $keys = [];
 
-        foreach (new Keyspace($this, $pattern) as $item) {
+        foreach (new Keyspace($this, $pattern, $count) as $item) {
             $keys[] = $item;
 
-            if (count($keys) === $count) {
+            if (count($keys) >= $limit) {
                 break;
             }
         }
 
         return $keys;
-    }
-
-    /**
-     * @return array{cursor: int|string, keys: array<int, string>}
-     */
-    public function scanKeysWithCursor(string $pattern, int $count, int|string|null $cursor): array {
-        $iterator = $cursor ?? 0;
-
-        $result = $this->scan($iterator, [
-            'MATCH' => $pattern,
-            'COUNT' => $count,
-        ]);
-
-        return [
-            'cursor' => $result[0] ?? 0,
-            'keys'   => $result[1] ?? [],
-        ];
     }
 
     public function listRem(string $key, string $value, int $count): int {
@@ -157,6 +123,82 @@ class Predis extends Client implements RedisCompatibilityInterface {
      */
     public function streamAdd(string $key, string $id, array $messages): string {
         return $this->xadd($key, $messages, $id);
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     *
+     * @throws Throwable
+     */
+    public function streamGroups(string $key): array {
+        return $this->xinfo->groups($key) ?: [];
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    public function streamConsumers(string $key, string $group): array {
+        return $this->xinfo->consumers($key, $group) ?: [];
+    }
+
+    /**
+     * @return array<int, mixed>
+     */
+    public function streamPending(string $key, string $group): array {
+        return $this->xpending($key, $group) ?: [];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function streamReadGroup(string $key, string $group, string $consumer, int $count): array {
+        return $this->xreadgroup_claim($group, $consumer, [$key => '>'], $count) ?: [];
+    }
+
+    public function streamCreateGroup(string $key, string $group, string $id = '0'): bool {
+        return (string) $this->xgroup->create($key, $group, $id) === 'OK';
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function vectorInfo(string $key): array {
+        $info = $this->vinfo($key);
+
+        return is_array($info) ? $info : [];
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    public function vectorMembers(string $key, int $count): array {
+        $members = $this->vrandmember($key, $count);
+
+        return is_array($members) ? array_map(strval(...), $members) : [];
+    }
+
+    /**
+     * @return array<int, float>
+     */
+    public function vectorEmbedding(string $key, string $element): array {
+        return $this->parseVectorEmbedding($this->vemb($key, $element));
+    }
+
+    public function vectorAttributes(string $key, string $element): string {
+        $attributes = $this->vgetattr($key, $element, true);
+
+        return is_string($attributes) ? $attributes : '';
+    }
+
+    /**
+     * @param array<int, float|string> $vector
+     */
+    public function vectorAdd(string $key, string $element, array $vector, string $attributes = ''): bool {
+        return $this->vadd($key, $vector, $element, attributes: $attributes !== '' ? $attributes : null);
+    }
+
+    public function vectorRem(string $key, string $element): bool {
+        return $this->vrem($key, $element);
     }
 
     public function rawcommand(string $command, mixed ...$arguments): mixed {
@@ -201,7 +243,7 @@ class Predis extends Client implements RedisCompatibilityInterface {
 
             $data[$key] = [
                 'ttl'   => $result[0],
-                'type'  => $result[1],
+                'type'  => $this->data_types[(string) $result[1]] ?? $result[1],
                 'size'  => $result[2] ?? 0,
                 'count' => isset($result[3]) && is_numeric($result[3]) ? (int) $result[3] : null,
             ];
@@ -214,6 +256,27 @@ class Predis extends Client implements RedisCompatibilityInterface {
         $size = $this->executeRaw(['MEMORY', 'USAGE', $key]);
 
         return is_int($size) ? $size : 0;
+    }
+
+    public function keyEncoding(string $key): string {
+        $encoding = $this->object('encoding', $key);
+
+        return is_string($encoding) ? $encoding : '';
+    }
+
+    /**
+     * @param array<int, string> $fields
+     *
+     * @return array<string, int>
+     */
+    public function hashFieldTtl(string $key, array $fields): array {
+        return $this->parseHashFieldTtl($this->httl($key, $fields), $fields);
+    }
+
+    public function hashFieldExpire(string $key, string $field, int $ttl): bool {
+        $reply = $ttl > 0 ? $this->hexpire($key, $ttl, [$field]) : $this->hpersist($key, [$field]);
+
+        return $this->hashFieldExpireApplied($reply);
     }
 
     public function flushDatabase(): bool {
@@ -240,15 +303,143 @@ class Predis extends Client implements RedisCompatibilityInterface {
     }
 
     /**
-     * @return array<int, string>
+     * @return array<int, array<string, mixed>>
      */
-    public function getCommands(): array {
-        $commands = $this->rawcommand('COMMAND');
+    public function latencyLatest(): array {
+        return $this->parseLatencyLatest($this->rawcommand('LATENCY', 'LATEST'));
+    }
 
-        return array_column($commands, 0);
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    public function latencyHistory(string $event): array {
+        return $this->parseLatencyHistory($this->rawcommand('LATENCY', 'HISTORY', $event));
+    }
+
+    public function latencyReset(): bool {
+        return is_numeric($this->rawcommand('LATENCY', 'RESET'));
+    }
+
+    public function latencyDoctor(): string {
+        return (string) $this->rawcommand('LATENCY', 'DOCTOR');
+    }
+
+    public function memoryDoctor(): string {
+        return (string) $this->rawcommand('MEMORY', 'DOCTOR');
+    }
+
+    public function commandExists(string $command): bool {
+        $info = $this->rawcommand('COMMAND', 'INFO', $command);
+
+        return is_array($info[0] ?? null);
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    public function getClients(): array {
+        $self_id = $this->rawcommand('CLIENT', 'ID');
+
+        return $this->parseClientList(
+            (string) $this->rawcommand('CLIENT', 'LIST'),
+            is_numeric($self_id) ? (string) $self_id : null
+        );
+    }
+
+    public function killClient(string $id): bool {
+        return (int) $this->rawcommand('CLIENT', 'KILL', 'ID', $id) > 0;
     }
 
     public function restoreKeys(string $key, int $ttl, string $value): bool {
         return (string) $this->restore($key, $ttl, $value) === 'OK';
+    }
+
+    /**
+     * @throws Exception
+     */
+    public function jsonGet(string $key): string {
+        return (string) $this->json('jsonget', [$key]);
+    }
+
+    /**
+     * @throws Exception
+     */
+    public function jsonSet(string $key, mixed $path): bool {
+        return (string) $this->json('jsonset', [$key, '$', $path]) === 'OK';
+    }
+
+    /**
+     * Run a native JSON command.
+     *
+     * @param array<int, mixed> $arguments
+     *
+     * @throws Exception
+     */
+    private function json(string $id, array $arguments): mixed {
+        try {
+            return $this->executeCommand($this->createCommand($id, $arguments));
+        } catch (Throwable $e) {
+            throw new RuntimeException($e->getMessage(), (int) $e->getCode(), $e);
+        }
+    }
+
+    /**
+     * @return array{channels: array<string, int>, patterns: int}
+     */
+    public function pubSubStats(string $pattern = '*'): array {
+        $channels = $this->executeRaw(['PUBSUB', 'CHANNELS', $pattern]);
+        $numsub = is_array($channels) && $channels !== [] ? $this->executeRaw(array_merge(['PUBSUB', 'NUMSUB'], $channels)) : [];
+        $numpat = $this->executeRaw(['PUBSUB', 'NUMPAT']);
+
+        return [
+            'channels' => $this->parseNumSubReply(is_array($numsub) ? $numsub : []),
+            'patterns' => is_numeric($numpat) ? (int) $numpat : 0,
+        ];
+    }
+
+    public function publishMessage(string $channel, string $message): int {
+        return $this->publish($channel, $message);
+    }
+
+    /**
+     * @return array<int, array{channel: string, message: string, time: int}>
+     */
+    public function captureMessages(string $pattern, int $seconds, int $limit): array {
+        $messages = [];
+        $start = microtime(true);
+
+        // A separate connection with a read timeout, so the blocking subscription can end.
+        $client = new self(['read_write_timeout' => $seconds] + $this->server);
+
+        try {
+            $pubsub = $client->pubSubLoop();
+            $pubsub->psubscribe($pattern);
+
+            foreach ($pubsub as $message) {
+                if ($message->kind === 'pmessage') {
+                    $messages[] = ['channel' => (string) $message->channel, 'message' => (string) $message->payload, 'time' => time()];
+                }
+
+                if (count($messages) >= $limit || (microtime(true) - $start) >= $seconds) {
+                    break;
+                }
+            }
+        } catch (Exception) {
+        }
+
+        $client->disconnect();
+
+        return $messages;
+    }
+
+    /**
+     * @param array<int, string> $args
+     *
+     * @throws Throwable
+     */
+    public function consoleCommand(array $args): mixed {
+        $reply = $this->executeCommand(RawCommand::create(...$args));
+
+        return $reply instanceof Status ? $reply->getPayload() : $reply;
     }
 }

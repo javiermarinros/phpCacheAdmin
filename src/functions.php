@@ -44,41 +44,11 @@ function autoload(string $path): void {
     }
 
     spl_autoload_register(static function (string $class_name) use ($path): void {
-        $class_name = str_replace("RobiNN\\Pca\\", '', $class_name);
-        $filename = str_replace("\\", DIRECTORY_SEPARATOR, $class_name);
+        $filename = strtr($class_name, ["RobiNN\\Pca\\" => '', "\\" => DIRECTORY_SEPARATOR]);
         $fullpath = $path.'src/'.$filename.'.php';
 
         if (is_file($fullpath)) {
             require_once $fullpath;
         }
-    });
-}
-
-if (PHP_SAPI !== 'cli' && !extension_loaded('xdebug')) {
-    set_error_handler(static function (int $errno, string $errstr, string $errfile, int $errline): bool {
-        if ((error_reporting() & $errno) === 0) {
-            return false;
-        }
-
-        $type = static function (int $errno): string {
-            $constants = get_defined_constants(true);
-            if (array_key_exists('Core', $constants)) {
-                foreach ($constants['Core'] as $constant => $value) {
-                    if ($value === $errno && str_starts_with($constant, 'E_')) {
-                        return $constant;
-                    }
-                }
-            }
-
-            return 'E_UNKNOWN';
-        };
-
-        $errstr = htmlspecialchars($errstr);
-
-        echo '<div class="text-red-500">';
-        echo $type($errno).': '.$errstr.' in '.$errfile.' on line '.$errline;
-        echo '</div>';
-
-        return true;
     });
 }

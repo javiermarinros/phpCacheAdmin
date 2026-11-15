@@ -15,6 +15,14 @@ class Helpers {
      * @param string $icon Icon name from `assets/icons/`, custom path or svg code.
      */
     public static function svg(string $icon, ?int $size = 16, ?string $class = null): string {
+        static $cache = [];
+
+        $cache_key = $icon.'|'.$size.'|'.$class;
+
+        if (isset($cache[$cache_key])) {
+            return $cache[$cache_key];
+        }
+
         $file = is_file($icon) ? $icon : __DIR__.'/../assets/icons/'.$icon.'.svg';
         $content = is_file($file) ? trim(file_get_contents($file)) : $icon;
 
@@ -22,15 +30,32 @@ class Helpers {
 
         $size_attr = $size !== null ? ' width="'.$size.'" height="'.$size.'"' : '';
         $class_attr = $class !== null ? ' class="'.$class.'"' : '';
-        $svg = preg_replace('~<svg([^<>]*)>~', '<svg'.($attributes[1] ?? '').$size_attr.$class_attr.'>', $content);
+        $tag = '<svg'.($attributes[1] ?? '').$size_attr.$class_attr.'>';
+        $svg = preg_replace('~<svg([^<>]*)>~', str_replace(['\\', '$'], ['\\\\', '\\$'], $tag), $content);
         $svg = preg_replace('/\s+/', ' ', $svg);
 
-        return str_replace("\n", '', $svg);
+        return $cache[$cache_key] = str_replace("\n", '', $svg);
     }
 
-    public static function alert(Template $template, string $message, ?string $color = null): string {
+    public static function makeDir(string $dir): bool {
+        if (!is_dir($dir) && !mkdir($dir, 0755, true) && !is_dir($dir)) {
+            return false;
+        }
+
+        $htaccess = $dir.'/.htaccess';
+
+        if (!is_file($htaccess)) {
+            @file_put_contents($htaccess, "Require all denied\n<IfModule !mod_authz_core.c>\n    Deny from all\n</IfModule>\n");
+        }
+
+        return true;
+    }
+
+    public static function alert(string $message, ?string $color = null): string {
+        $template = Template::get();
+
         $alert = $template->render('components/alert', [
-            'message'     => $message,
+            'message'     => htmlspecialchars($message),
             'alert_color' => $color, // success/error
         ]);
 
@@ -76,59 +101,152 @@ class Helpers {
      * @return array<string, array<string, int|string|bool>>
      */
     public static function getExtIniInfo(string $extension): array {
-        static $info = [];
+        static $cache = [];
 
-        if (extension_loaded($extension)) {
-            foreach (ini_get_all($extension) as $ini_name => $ini_value) {
-                $info['ini_config'][$ini_name] = $ini_value['local_value'];
-            }
+        if (isset($cache[$extension])) {
+            return $cache[$extension];
         }
 
-        return $info;
+        if (!extension_loaded($extension)) {
+            return $cache[$extension] = [];
+        }
+
+        $ini_config = array_map(static function (array $ini_value) {
+            return $ini_value['local_value'];
+        }, ini_get_all($extension));
+
+        return $cache[$extension] = ['ini_config' => $ini_config];
     }
 
-    public static function deleteKey(Template $template, callable $delete_key, bool $base64 = false): string {
+    public static function deleteKey(callable $delete_key): string {
         try {
             $keys = json_decode(Http::post('delete', ''), false, 512, JSON_THROW_ON_ERROR);
         } catch (JsonException) {
             $keys = [];
         }
 
-        $b64_decode = static fn ($key): string => $base64 ? base64_decode($key) : $key;
-
-        if (is_string($keys) && $delete_key($b64_decode($keys))) {
-            return self::alert($template, sprintf('Key "%s" has been deleted.', $b64_decode($keys)), 'success');
+        if (is_string($keys) && $delete_key(base64_decode($keys))) {
+            return self::alert(sprintf('Key "%s" has been deleted.', base64_decode($keys)), 'success');
         }
 
         if (is_array($keys) && count($keys)) {
             foreach ($keys as $key) {
-                $delete_key($b64_decode($key));
+                $delete_key(base64_decode($key));
             }
 
-            return self::alert($template, 'Keys has been deleted.', 'success');
+            return self::alert('Keys have been deleted.', 'success');
         }
 
-        return self::alert($template, 'No keys are selected.');
+        return self::alert('No keys are selected.');
     }
 
-    public static function import(callable $exists, callable $store): void {
-        if ($_FILES['import']['type'] === 'application/json') {
-            $file = file_get_contents($_FILES['import']['tmp_name']);
+    /**
+     * @param callable(string): bool              $exists
+     * @param callable(string, string, int): bool $store
+     *
+     * @return array{imported: int, skipped: int, failed: int, error: ?string}
+     */
+    public static function import(callable $exists, callable $store, bool $tests = false): array {
+        $result = ['imported' => 0, 'skipped' => 0, 'failed' => 0, 'error' => null];
 
-            try {
-                $json = json_decode($file, true, 512, JSON_THROW_ON_ERROR);
+        if (!isset($_FILES['import']) || $_FILES['import']['error'] !== UPLOAD_ERR_OK || (!$tests && !is_uploaded_file($_FILES['import']['tmp_name']))) {
+            $result['error'] = 'No file was uploaded.';
 
-                foreach ($json as $data) {
-                    if (!$exists($data['key'])) {
-                        $store($data['key'], $data['value'], (int) $data['ttl']);
-                    }
-                }
-            } catch (JsonException) {
-                //
+            return self::finishImport($result, $tests);
+        }
+
+        $file = (string) file_get_contents($_FILES['import']['tmp_name']);
+
+        try {
+            $json = json_decode($file, true, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException $e) {
+            $result['error'] = 'The file is not valid JSON: '.$e->getMessage();
+
+            return self::finishImport($result, $tests);
+        }
+
+        if (!is_array($json) || ($json !== [] && !array_is_list($json))) {
+            $result['error'] = 'The file does not contain a list of keys.';
+
+            return self::finishImport($result, $tests);
+        }
+
+        foreach ($json as $data) {
+            if (!is_array($data) || !isset($data['key'], $data['value'], $data['ttl'])) {
+                $result['failed']++;
+                continue;
             }
 
-            Http::redirect(['view']);
+            // Existing keys are left untouched so that a backup never overwrites newer data.
+            if ($exists((string) $data['key'])) {
+                $result['skipped']++;
+                continue;
+            }
+
+            if ($store((string) $data['key'], (string) $data['value'], (int) $data['ttl'])) {
+                $result['imported']++;
+            } else {
+                $result['failed']++;
+            }
         }
+
+        return self::finishImport($result, $tests);
+    }
+
+    /**
+     * @param array{imported: int, skipped: int, failed: int, error: ?string} $result
+     *
+     * @return array{imported: int, skipped: int, failed: int, error: ?string}
+     */
+    private static function finishImport(array $result, bool $tests): array {
+        if ($tests) {
+            return $result;
+        }
+
+        Http::startSession();
+        $_SESSION['pca_import_result'] = $result;
+
+        Http::redirect(['view']);
+
+        return $result;
+    }
+
+    /**
+     * Alert with the result of the last import (shown once, after the redirect).
+     */
+    public static function importResultAlert(): string {
+        Http::startSession();
+
+        $result = $_SESSION['pca_import_result'] ?? null;
+        unset($_SESSION['pca_import_result']);
+
+        if (!is_array($result)) {
+            return '';
+        }
+
+        if (($result['error'] ?? null) !== null) {
+            return self::alert((string) $result['error'], 'error');
+        }
+
+        $parts = [];
+
+        if ($result['imported'] > 0) {
+            $parts[] = $result['imported'].' imported';
+        }
+
+        if ($result['skipped'] > 0) {
+            $parts[] = $result['skipped'].' skipped (already exist)';
+        }
+
+        if ($result['failed'] > 0) {
+            $parts[] = $result['failed'].' failed';
+        }
+
+        if ($parts === []) {
+            return self::alert('The file contained no keys to import.', 'error');
+        }
+
+        return self::alert('Import finished: '.implode(', ', $parts).'.', $result['failed'] > 0 ? 'error' : 'success');
     }
 
     /**
@@ -143,7 +261,8 @@ class Helpers {
                 continue;
             }
 
-            $ttl = isset($key['info']['ttl']) && is_int($key['info']['ttl']) ? $key['info']['ttl'] : 0;
+            $ttl = $key['info']['ttl'] ?? $key['ttl'] ?? 0;
+            $ttl = is_int($ttl) ? $ttl : 0;
 
             $json[] = [
                 'key'   => $key['key'],
@@ -162,39 +281,138 @@ class Helpers {
             return $output;
         }
 
-        header('Content-disposition: attachment; filename='.$filename.'.json');
+        $safe_filename = preg_replace('/[\x00-\x1f"\\\\]+/', '', $filename);
+        header('Content-disposition: attachment; filename="'.$safe_filename.'.json"');
         header('Content-Type: application/json');
         echo $output;
         exit;
     }
 
     /**
-     * @param array<string, int|string> $server
+     * @param array<string, mixed> $server
      */
     public static function getServerTitle(array $server): string {
         $name = $server['name'] ?? 'Server';
+
+        if (!empty($server['sentinels']) && is_array($server['sentinels'])) {
+            return $name.' - '.($server['sentinelmaster'] ?? 'mymaster');
+        }
+
         $host = isset($server['host']) ? ' - '.$server['host'] : '';
         $port = isset($server['port']) ? ':'.$server['port'] : '';
 
-        return "{$name}{$host}{$port}";
+        return $name.$host.$port;
+    }
+
+    public static function cronjobUrl(string $dashboard, int $server_id): string {
+        $https = Http::isHttps();
+        $host = ($_SERVER['HTTP_HOST'] ?? 'localhost');
+        $path = (parse_url(($_SERVER['REQUEST_URI'] ?? '/'), PHP_URL_PATH) ?: '/');
+
+        $url = ($https ? 'https' : 'http').'://'.$host.$path.'?dashboard='.$dashboard.'&server='.$server_id.'&ajax&metrics';
+
+        $token = (string) Config::get('authtoken', '');
+
+        if ($token !== '' && Auth::isEnabled()) {
+            $url .= '&token='.rawurlencode($token);
+        }
+
+        return $url;
     }
 
     /**
-     * @param array<int, array<string, int|string>> $servers
+     * @param array<int|string, mixed> $panels
      */
-    public static function serverSelector(Template $template, array $servers, int $selected): string {
+    public static function panels(array $panels): string {
+        if (isset($panels['error']) && is_string($panels['error'])) {
+            return htmlspecialchars($panels['error']);
+        }
+
+        $html = '';
+
+        foreach ($panels as $panel) {
+            if (is_array($panel) && $panel !== []) {
+                $html .= Template::get()->render('partials/panel', [
+                    'panel_title' => $panel['title'] ?? null,
+                    'array'       => $panel['data'] ?? [],
+                ]);
+            }
+        }
+
+        return $html;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $servers
+     */
+    public static function serverSelector(array $servers, int $selected): string {
         if (count($servers) === 1) {
             return '';
         }
 
         $options = array_map(self::getServerTitle(...), $servers);
 
-        return $template->render('components/select', [
+        return Template::get()->render('components/select', [
             'id'            => 'server_select',
             'options'       => $options,
             'selected'      => $selected,
             'wrapper_class' => false,
+            'aria_label'    => 'Server',
         ]);
+    }
+
+    /**
+     * The column and direction picked in the table header, and the globals the header needs to render itself.
+     *
+     * @return array{0: string, 1: string}
+     */
+    private static function sortState(): array {
+        $dir = (string) Http::get('sortdir', 'none');
+        $column = (string) Http::get('sortcol', 'none');
+
+        Template::get()->addGlobal('sortdir', $dir);
+        Template::get()->addGlobal('sortcol', $column);
+
+        return [$column, $dir];
+    }
+
+    /**
+     * Sort the whole list before it is paginated.
+     * Only for values that are already in memory.
+     *
+     * @param array<int, mixed>                          $items
+     * @param array<string, callable(mixed): mixed|true> $columns
+     *
+     * @return array<int, mixed>
+     */
+    public static function sortBeforePaginate(array $items, array $columns): array {
+        [$column, $dir] = self::sortState();
+        $dir = strtolower($dir);
+
+        if (!isset($columns[$column]) || !in_array($dir, ['asc', 'desc'], true)) {
+            return $items;
+        }
+
+        $threshold = (int) Config::get('sortthreshold', 100_000);
+
+        if ($threshold > 0 && count($items) > $threshold) {
+            Template::get()->addGlobal('page_sort_only', true);
+
+            return $items;
+        }
+
+        $getter = $columns[$column];
+
+        if ($getter === true) {
+            $dir === 'desc' ? rsort($items, SORT_NATURAL) : sort($items, SORT_NATURAL);
+
+            return $items;
+        }
+
+        $values = array_map($getter, $items);
+        array_multisort($values, $dir === 'desc' ? SORT_DESC : SORT_ASC, SORT_NATURAL, $items);
+
+        return $items;
     }
 
     /**
@@ -202,20 +420,16 @@ class Helpers {
      *
      * @return array<int, array<string, mixed>>
      */
-    public static function sortKeys(Template $template, array $keys): array {
-        $dir = Http::get('sortdir', 'none');
-        $column = Http::get('sortcol', 'none');
-
-        $template->addGlobal('sortdir', $dir);
-        $template->addGlobal('sortcol', $column);
+    public static function sortKeys(array $keys): array {
+        [$column, $dir] = self::sortState();
 
         if (strtolower($dir) === 'none' || strtolower($column) === 'none') {
             return $keys;
         }
 
         usort($keys, static function (array $a, array $b) use ($dir, $column): int {
-            $a_val = (string) $a['info'][$column];
-            $b_val = (string) $b['info'][$column];
+            $a_val = (string) ($a['info'][$column] ?? '');
+            $b_val = (string) ($b['info'][$column] ?? '');
             $comparison = strnatcmp($a_val, $b_val);
 
             return strtolower($dir) === 'desc' ? -$comparison : $comparison;
@@ -225,30 +439,201 @@ class Helpers {
     }
 
     /**
-     * Count children and calculate the total size of a key tree.
+     * Build a folder tree for the tree view from a flat list of keys.
      *
-     * @param array<int|string, mixed> &$tree
+     * Each item must contain the full key name under 'key'. Everything else ('info', 'items', ...) is copied to the leaf node as is.
      *
-     * @return array{count: int, size: int}
+     * @param array<int, array<string, mixed>> $keys
+     * @param callable|null                    $leaf_name Optional formatter for the displayed leaf name.
+     *
+     * @return array<int|string, mixed>
      */
-    public static function calculateStats(array &$tree): array {
+    public static function keysTree(array $keys, string $separator, ?callable $leaf_name = null): array {
+        $tree = [];
+
+        foreach ($keys as $key_item) {
+            $key = (string) $key_item['key'];
+            $parts = explode($separator, $key);
+            $last = count($parts) - 1;
+
+            /** @var array<int|string, mixed> $current */
+            $current = &$tree;
+            $path = '';
+
+            foreach ($parts as $i => $part) {
+                $path = $path === '' ? $part : $path.$separator.$part;
+
+                if ($i === $last) {
+                    $current[] = [
+                        'type' => 'key',
+                        'name' => $leaf_name !== null ? $leaf_name($part) : $part,
+                        ...$key_item,
+                    ];
+                } else {
+                    $current[$part] ??= [
+                        'type'     => 'folder',
+                        'name'     => $part,
+                        'path'     => $path,
+                        'children' => [],
+                        'expanded' => false,
+                    ];
+                    $current = &$current[$part]['children'];
+                }
+            }
+
+            unset($current);
+        }
+
+        self::countChildren($tree);
+
+        return $tree;
+    }
+
+    /**
+     * @param array<int|string, mixed> &$tree
+     */
+    public static function countChildren(array &$tree): int {
         $count = 0;
-        $size = 0;
 
         foreach ($tree as &$item) {
             if (isset($item['type']) && $item['type'] === 'folder') {
-                $result = self::calculateStats($item['children']);
-                $item['count'] = $result['count'];
-                $item['size'] = $result['size'];
-                $count += $result['count'];
-                $size += $result['size'];
+                $item['count'] = self::countChildren($item['children']);
+                $count += $item['count'];
             } else {
                 $count++;
-                $size += (int) ($item['info']['bytes_size'] ?? 0);
             }
         }
 
-        return ['count' => $count, 'size' => $size];
+        return $count;
+    }
+
+    /**
+     * Whether a key matches a search. Without wildcards it is a case-insensitive substring search,
+     * with them (* or %, any sequence of characters) the whole key must match.
+     */
+    public static function matchSearchPattern(string $key, string $pattern): bool {
+        if ($pattern === '' || $pattern === '*') {
+            return true;
+        }
+
+        if (!str_contains($pattern, '*') && !str_contains($pattern, '%')) {
+            return stripos($key, $pattern) !== false;
+        }
+
+        $regex = str_replace(['\*', '%'], '.*', preg_quote($pattern, '/'));
+
+        return preg_match('/^'.$regex.'$/is', $key) === 1;
+    }
+
+    /**
+     * The namespace sent by the delete button of the namespace view (a JSON string, like the keys of deleteKey()).
+     * Empty when nothing valid was sent.
+     */
+    public static function namespaceFromPost(): string {
+        try {
+            $namespace = json_decode(Http::post('deletenamespace', ''), false, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException) {
+            $namespace = '';
+        }
+
+        return is_string($namespace) ? $namespace : '';
+    }
+
+    /**
+     * Groups keys by the next namespace level below a prefix (namespace view).
+     *
+     * @param iterable<string, int> $keys Key => size in bytes, only keys inside the prefix.
+     *
+     * @return array{
+     *     namespaces: array<int, array{name: string, path: string, count: int, size: int, percentage: float, has_children: bool, direct_keys: int, direct_keys_names: array<int, string>}>,
+     *     direct_keys_count: int,
+     *     direct_keys_size: int,
+     *     direct_keys_percentage: float,
+     *     direct_keys_names: array<int, string>,
+     *     pagination: array{page: int, per_page: int, total: int, total_pages: int},
+     * }
+     */
+    public static function namespaceStats(iterable $keys, string $prefix, string $separator, int $page = 1, int $per_page = 100): array {
+        $title_keys = (int) Config::get('nstitlekeys', 25);
+        $prefix_len = $prefix !== '' ? strlen($prefix.$separator) : 0;
+        $per_page = max(1, $per_page);
+
+        $namespaces = [];
+        $total_size = 0;
+        $direct_count = 0;
+        $direct_size = 0;
+        $direct_names = [];
+
+        foreach ($keys as $key => $size) {
+            $key = (string) $key;
+            $total_size += $size;
+            $parts = explode($separator, substr($key, $prefix_len), 3);
+
+            // A key without a separator after the prefix is a direct key of this level.
+            if (count($parts) === 1) {
+                $direct_count++;
+                $direct_size += $size;
+
+                if ($direct_count <= $title_keys) {
+                    $direct_names[] = $parts[0];
+                }
+
+                continue;
+            }
+
+            $path = $prefix !== '' ? $prefix.$separator.$parts[0] : $parts[0];
+
+            $namespaces[$path] ??= [
+                'name'              => $parts[0],
+                'path'              => $path,
+                'count'             => 0,
+                'size'              => 0,
+                'percentage'        => 0.0,
+                'has_children'      => false,
+                'direct_keys'       => 0,
+                'direct_keys_names' => [],
+            ];
+
+            $namespaces[$path]['count']++;
+            $namespaces[$path]['size'] += $size;
+
+            if (count($parts) > 2) {
+                $namespaces[$path]['has_children'] = true;
+            } elseif (++$namespaces[$path]['direct_keys'] <= $title_keys) {
+                $namespaces[$path]['direct_keys_names'][] = $parts[1];
+            }
+        }
+
+        // The key names are only listed (in the title attribute) for small namespaces.
+        foreach ($namespaces as &$namespace) {
+            $namespace['percentage'] = $total_size > 0 ? round($namespace['size'] / $total_size * 100, 2) : 0.0;
+
+            if ($namespace['direct_keys'] > $title_keys) {
+                $namespace['direct_keys_names'] = [];
+            }
+        }
+
+        unset($namespace);
+
+        uasort($namespaces, static fn (array $a, array $b): int => $b['size'] <=> $a['size']);
+
+        $total = count($namespaces);
+        $total_pages = (int) ceil($total / $per_page);
+        $page = max(1, min($page, $total_pages));
+
+        return [
+            'namespaces'             => array_slice(array_values($namespaces), ($page - 1) * $per_page, $per_page),
+            'direct_keys_count'      => $direct_count,
+            'direct_keys_size'       => $direct_size,
+            'direct_keys_percentage' => $total_size > 0 ? round($direct_size / $total_size * 100, 2) : 0.0,
+            'direct_keys_names'      => $direct_count > $title_keys ? [] : $direct_names,
+            'pagination'             => [
+                'page'        => $page,
+                'per_page'    => $per_page,
+                'total'       => $total,
+                'total_pages' => $total_pages,
+            ],
+        ];
     }
 
     /**
@@ -276,30 +661,14 @@ class Helpers {
     }
 
     /**
-     * Comprueba si una clave coincide con un patrón de búsqueda.
-     * Soporta comodines: * y % coinciden con cualquier secuencia de caracteres.
-     *
-     * @param string $key     La clave a comprobar.
-     * @param string $pattern El patrón de búsqueda (puede contener * o % como comodines).
+     * @param array<int|string, mixed> $data
      */
-    public static function matchSearchPattern(string $key, string $pattern): bool {
-        if ($pattern === '' || $pattern === '*') {
-            return true;
+    public static function ajaxJson(array $data, int $flags = 0): string {
+        try {
+            return json_encode($data, JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE | $flags);
+        } catch (JsonException) {
+            return '{"error":"JSON encoding failed"}';
         }
-
-        // Si no hay comodines, hacer búsqueda por subcadena (case-insensitive)
-        if (!str_contains($pattern, '*') && !str_contains($pattern, '%')) {
-            return stripos($key, $pattern) !== false;
-        }
-
-        // Escapar caracteres especiales de regex
-        $regex = preg_quote($pattern, '/');
-
-        // Reemplazar los comodines escapados por el patrón regex correspondiente
-        // preg_quote escapa * como \* y % no se escapa (no es especial en regex)
-        $regex = str_replace(['\\*', '%'], '.*', $regex);
-
-        return preg_match('/^' . $regex . '$/i', $key) === 1;
     }
 
     /**
@@ -311,10 +680,7 @@ class Helpers {
         $api_data = [];
 
         if (isset($panel_data['error'])) {
-            try {
-                return json_encode($panel_data, JSON_THROW_ON_ERROR);
-            } catch (JsonException) {
-            }
+            return self::ajaxJson($panel_data);
         }
 
         foreach ($panel_data as $panel) {
@@ -336,11 +702,22 @@ class Helpers {
             }
         }
 
-        try {
-            return json_encode($api_data, JSON_THROW_ON_ERROR);
-        } catch (JsonException) {
-        }
+        return self::ajaxJson($api_data);
+    }
 
-        return '';
+    public static function utilizationStatus(float $percentage): string {
+        return match (true) {
+            $percentage > 80 => 'critical',
+            $percentage > 50 => 'warning',
+            default => 'healthy',
+        };
+    }
+
+    public static function hitRateStatus(float $percentage): string {
+        return match (true) {
+            $percentage >= 80 => 'healthy',
+            $percentage >= 50 => 'warning',
+            default => 'critical',
+        };
     }
 }

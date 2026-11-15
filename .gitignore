@@ -6,5 +6,10 @@ composer.lock
 node_modules
 package-lock.json
 /config.php
+/.env
+/.env.*
+!/.env.example
 .phpunit.result.cache
 .ide_helper.php
+rector.php
+.twig-cs-fixer.cache

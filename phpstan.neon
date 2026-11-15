@@ -4,7 +4,9 @@ parameters:
     paths:
         - src
         - tests
+        - pca-remote.php
     ignoreErrors:
         -
-            message: '~^Method RedisCluster::(info|rawcommand)\(\) invoked with \d+ parameters, .* required\.$~'
-            path: src/Dashboards/Redis/Compatibility/Cluster/RedisCluster.php
+            message: '#Call to an undefined method COM::ExecQuery\(\)\.#'
+            path: src/Dashboards/Server/ServerResources.php
+            identifier: method.notFound

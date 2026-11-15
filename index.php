@@ -6,9 +6,8 @@
 
 declare(strict_types=1);
 
-// Always display errors
-ini_set('display_errors', 'On');
-ini_set('display_startup_errors', 'On');
+ini_set('display_errors', 'Off');
+ini_set('display_startup_errors', 'Off');
 error_reporting(E_ALL);
 
 if (getenv('PCA_PHP_MEMORY_LIMIT')) {
@@ -31,11 +30,18 @@ if (is_file(__DIR__.'/vendor/autoload.php')) {
     autoload($path);
 }
 
-$auth = false;
+RobiNN\Pca\Config::loadDotenv($path);
 
-if (is_callable(RobiNN\Pca\Config::get('auth'))) {
-    RobiNN\Pca\Config::get('auth')();
-    $auth = true;
+if (RobiNN\Pca\Config::get('debug', false)) {
+    ini_set('display_errors', 'On');
+    ini_set('display_startup_errors', 'On');
 }
 
-echo (new RobiNN\Pca\Admin())->render($auth);
+if (!RobiNN\Pca\Http::isAllowedHost()) {
+    http_response_code(403);
+    exit('Forbidden.');
+}
+
+RobiNN\Pca\Auth::check();
+
+echo (new RobiNN\Pca\Admin())->render();

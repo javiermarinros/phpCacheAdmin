@@ -8,19 +8,46 @@ declare(strict_types=1);
 
 namespace RobiNN\Pca;
 
+use Dotenv\Dotenv;
 use JsonException;
 
 class Config {
     /**
+     * Config keys that hold the options of one dashboard, so an ENV variable can address them by name.
+     *
+     * @var array<int, string>
+     */
+    private const GROUPED = ['redis', 'memcached', 'apcu', 'opcache', 'remoteservers'];
+
+    /**
+     * Options that are always strings, so a value like "123456", "1e5", "null" or "true" is not decoded as JSON.
+     *
+     * @var array<int, string>
+     */
+    private const STRING_KEYS = [
+        'password', 'username', 'sentinelpassword', 'token', 'authtoken', 'hash', 'name', 'host', 'path', 'authfile',
+        'sentinelmaster', 'scheme', 'url', 'separator', 'timeformat', 'timezone', 'decimalsep', 'thousandssep',
+        'tmpdir', 'twigcache', 'metricsdir', 'pcapath', 'settingsfile',
+    ];
+
+    /**
      * @var array<string, mixed>|null
      */
     private static ?array $config = null;
+
+    /**
+     * The config without the settings saved in the UI.
+     *
+     * @var array<string, mixed>|null
+     */
+    private static ?array $base = null;
 
     private static ?string $config_path = null;
 
     public static function setConfigPath(string $path): void {
         self::$config_path = $path;
         self::$config = null;
+        self::$base = null;
     }
 
     /**
@@ -28,24 +55,89 @@ class Config {
      */
     public static function reset(): void {
         self::$config = null;
+        self::$base = null;
         self::$config_path = null;
     }
 
     /**
+     * The config file with ENV variables, without the settings saved in the UI.
+     *
+     * @return array<string, mixed>
+     */
+    public static function base(): array {
+        if (self::$base === null) {
+            self::load();
+        }
+
+        return (array) self::$base;
+    }
+
+    /**
+     * Load environment variables from an .env file.
+     *
+     * Requires vlucas/phpdotenv.
+     *
+     * Real environment variables (e.g., set by Docker) always take precedence over the values defined in the file.
+     */
+    public static function loadDotenv(?string $path = null): void {
+        if (!class_exists(Dotenv::class)) {
+            return;
+        }
+
+        Dotenv::createUnsafeImmutable($path ?? __DIR__.'/..', '.env')->safeLoad();
+    }
+
+    /**
+     * The file the configuration is written to, never the dist file that is only a fallback.
+     */
+    public static function file(): string {
+        return self::$config_path ?? __DIR__.'/../config.php';
+    }
+
+    /**
+     * Get a config value.
+     *
+     * An option of one of the grouped keys is addressed with a dot, e.g., get('apcu.separator').
+     * A key that exists as-is always wins, so a top-level key containing a dot is still reachable.
+     *
      * @template Default
      *
      * @param Default $default
      *
      * @return mixed|Default
      */
-    public static function get(string $key, $default = null) {
-        if (self::$config !== null) {
-            return self::$config[$key] ?? $default;
+    public static function get(string $key, $default = null): mixed {
+        $config = self::$config ?? self::load();
+
+        if (isset($config[$key])) {
+            return $config[$key];
         }
 
+        if (str_contains($key, '.')) {
+            $value = $config;
+
+            foreach (explode('.', $key) as $segment) {
+                if (!is_array($value) || !isset($value[$segment])) {
+                    return $default;
+                }
+
+                $value = $value[$segment];
+            }
+
+            return $value;
+        }
+
+        return $default;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private static function load(): array {
+        // A custom path that does not exist yet falls back to the defaults, never to another config.php, that is not the file AuthSetup writes to.
         if (self::$config_path !== null && is_file(self::$config_path)) {
             $config = (array) require self::$config_path;
-        } elseif (is_file(__DIR__.'/../config.php')) {
+        } elseif (self::$config_path === null && is_file(__DIR__.'/../config.php')) {
             $config = (array) require __DIR__.'/../config.php';
         } elseif (is_file(__DIR__.'/../config.dist.php')) {
             $config = (array) require __DIR__.'/../config.dist.php';
@@ -53,15 +145,18 @@ class Config {
             exit('The configuration file is missing.');
         }
 
-        $config = self::getEnvConfig($config);
+        $base = self::getEnvConfig($config);
+        self::$base = $base;
 
-        if ($key === 'converters' && !isset($config['converters'])) {
-            $key = 'encoding';
+        // Saved settings go over the config file, ENV variables are applied again so they still win.
+        if (($base['settings'] ?? false) === true) {
+            $saved = Settings::read(Settings::file($base));
+            $base = $saved === [] ? $base : self::getEnvConfig(Settings::merge($config, $saved));
         }
 
-        self::$config = $config;
+        self::$config = $base;
 
-        return self::$config[$key] ?? $default;
+        return $base;
     }
 
     /**
@@ -69,7 +164,7 @@ class Config {
      *
      * All keys from the config file are supported ENV variables, they just must start with PCA_ prefix.
      *
-     * E.g.
+     * E.g.:
      * PCA_TIMEFORMAT
      * PCA_REDIS_1_HOST = 1 is server id
      * PCA_MEMCACHED_0_HOST ...
@@ -88,6 +183,16 @@ class Config {
         return $config;
     }
 
+    private static function startsWithAny(string $name): bool {
+        foreach (self::GROUPED as $prefix) {
+            if (str_starts_with($name, $prefix)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /**
      * Convert an ENV variable to an array.
      *
@@ -97,8 +202,10 @@ class Config {
      */
     private static function envVarToArray(array &$array, string $var, string $value): void {
         $lower_var = strtolower(substr($var, 4));
+        $segments = explode('_', $lower_var);
+        $last_key = end($segments);
 
-        if (json_validate($value)) {
+        if (!in_array($last_key, self::STRING_KEYS, true) && json_validate($value)) {
             try {
                 $value = json_decode($value, true, 512, JSON_THROW_ON_ERROR);
             } catch (JsonException) {
@@ -106,8 +213,9 @@ class Config {
             }
         }
 
-        // Redis and Memcached variables: PCA_REDIS_1_HOST $config['redis'][1]['host']
-        if (str_starts_with($lower_var, 'redis') || str_starts_with($lower_var, 'memcached')) {
+        // Options grouped per dashboard: PCA_REDIS_1_HOST $config['redis'][1]['host'], PCA_APCU_SEPARATOR $config['apcu']['separator'].
+        // A name with no underscore after the group (PCA_REDISOPTIONS) stays at the top level, there is nothing to nest it in.
+        if (self::startsWithAny($lower_var)) {
             $keys = explode('_', $lower_var);
             $final_key = array_pop($keys);
 
@@ -142,15 +250,8 @@ class Config {
             return [];
         }
 
-        $encoders_array = array_keys($encoders);
-        $encoders_array[] = 'none';
+        $names = [...array_keys($encoders), 'none'];
 
-        static $array = [];
-
-        foreach ($encoders_array as $encoder) {
-            $array[$encoder] = $encoder;
-        }
-
-        return $array;
+        return array_combine($names, $names);
     }
 }

@@ -1,4 +1,4 @@
-<?php
+<?php // @formatter:off
 /**
  * This file is part of the phpCacheAdmin.
  * Copyright (c) Róbert Kelčák (https://kelcak.com/)
@@ -12,10 +12,7 @@ declare(strict_types=1);
 
 return [
     /**
-     * The order of the items also changes the position of the
-     * sidebar links, the first item is also the default dashboard.
-     *
-     * You can comment out (or delete) any dashboard.
+     * Enabled dashboards and their order. The first item is the default dashboard.
      */
     'dashboards' => [
         RobiNN\Pca\Dashboards\Server\ServerDashboard::class,
@@ -24,6 +21,14 @@ return [
         RobiNN\Pca\Dashboards\OPCache\OPCacheDashboard::class,
         RobiNN\Pca\Dashboards\APCu\APCuDashboard::class,
         RobiNN\Pca\Dashboards\Realpath\RealpathDashboard::class,
+    ],
+    'redisoptions' => [
+        //'client' => 'predis', // redis or predis. Auto-detected when not set.
+        //'blockedcommands' => ['CONFIG SET', 'CONFIG REWRITE', 'REPLICAOF', 'SLAVEOF', 'MIGRATE', 'RESTORE', 'SAVE'], // Extra commands to refuse in the console.
+        'pubsubrefresh' => 5, // In seconds, refresh interval for the Pub/Sub active channels list - default 5
+        'pubsubwindow' => 5, // In seconds, how long one Pub/Sub monitor request captures messages (1-10) - default 5
+        'scanthreshold' => 100_000, // Use SCAN automatically instead of KEYS when the database has more keys than this, 1000 keys are retrieved - default 100_000
+        //'scansize' => 1000, // Always use SCAN and retrieve at most this many keys, regardless of 'scanthreshold' (optional).
     ],
     'redis' => [
         [
@@ -36,21 +41,31 @@ return [
                 '127.0.0.1:7002',
             ],*/
             'port' => 6379, // Optional when the default port is used.
-            //'scheme'    => 'tls', // Connection scheme (optional).
-            /*'ssl'       => [
+            /*'sentinels' => [
+                // List of Sentinels. The current master is looked up on every request, so failover is picked up on the next page load.
+                '127.0.0.1:26379',
+                '127.0.0.1:26380',
+                '127.0.0.1:26381',
+            ],*/
+            //'sentinelmaster' => 'mymaster', // Name of the monitored master (optional). Default mymaster.
+            //'sentinelpassword' => '', // Password of the Sentinels themselves, not of the master (optional).
+            //'scheme' => 'tls', // Connection scheme (optional).
+            /*'ssl' => [
                 // SSL options for TLS https://www.php.net/manual/en/context.ssl.php - requires Redis >= 6.0 (optional).
-                'cafile'      => 'private.pem',
+                'cafile' => 'private.pem',
                 'verify_peer' => true,
             ],*/
-            //'database'  => 0, // Default database (optional).
-            //'username'  => '', // ACL - requires Redis >= 6.0 (optional).
-            //'password'  => '', // Optional.
-            //'authfile'  => '/run/secrets/file_name', // File with a password, e.g., Docker secrets (optional).
-            //'path'      => '/var/run/redis/redis-server.sock', // Unix domain socket (optional).
+            //'database' => 0, // Default database (optional).
+            //'username' => '', // ACL - requires Redis >= 6.0 (optional).
+            //'password' => '', // Optional.
+            //'authfile' => '/run/secrets/file_name', // File with a password, e.g., Docker secrets (optional).
+            //'path' => '/var/run/redis/redis-server.sock', // Unix domain socket (optional).
             //'databases' => 16, // Number of databases, use this if the CONFIG command is disabled (optional).
-            //'scansize'  => 1000, // Number of keys, the server will use the SCAN command instead of KEYS (optional).
-            //'separator' => ':', // Separator for tree view (optional)
+            //'separator' => ':', // Separator for tree view (optional).
         ],
+    ],
+    'memcachedoptions' => [
+        //'blockedcommands' => ['flush_all', 'stats reset'], // Extra commands to refuse in the console, the case does not matter.
     ],
     'memcached' => [
         [
@@ -58,62 +73,57 @@ return [
             'host' => '127.0.0.1', // Optional when a path is specified.
             'port' => 11211, // Optional when the default port is used.
             //'path' => '/var/run/memcached/memcached.sock', // Unix domain socket (optional).
-            //'separator' => ':', // Separator for tree view (optional)
+            //'separator' => ':', // Separator for tree view (optional).
+            //'extension' => true, // Enable Memcached extension only for get and set operations (optional).
         ],
     ],
-    'apcuseparator' => ':', // Separator for tree view (optional)
-    // Example of authentication with http auth.
-    /*'auth'           => static function (): void {
-        $username = 'admin';
-        $password = 'pass';
-
-        if (isset($_GET['logout'])) {
-            setcookie('auth_reset', '1', time() + 60, '/');
-
-            $clean_uri = strtok($_SERVER['REQUEST_URI'], '?');
-            $is_https = (
-                (isset($_SERVER['HTTPS']) && ($_SERVER['HTTPS'] === 'on' || $_SERVER['HTTPS'] === 1)) ||
-                (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https')
-            );
-
-            header('Location: http'.($is_https ? 's' : '').'://'.$_SERVER['HTTP_HOST'].$clean_uri);
-            exit;
-        }
-
-        if (isset($_COOKIE['auth_reset'])) {
-            setcookie('auth_reset', '', time() - 3600, '/');
-
-            header('WWW-Authenticate: Basic realm="phpCacheAdmin Login"');
-            header('HTTP/1.0 401 Unauthorized');
-            exit('You have been logged out.');
-        }
-
-        if (
-            !isset($_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW']) ||
-            $_SERVER['PHP_AUTH_USER'] !== $username || $_SERVER['PHP_AUTH_PW'] !== $password
-        ) {
-            header('WWW-Authenticate: Basic realm="phpCacheAdmin Login"');
-            header('HTTP/1.0 401 Unauthorized');
-            exit('Incorrect username or password!');
-        }
-    },*/
+    'apcu' => [
+        'separator' => ':', // Separator for tree view (optional).
+    ],
+    'opcache' => [
+        //'warmuppaths' => ['/var/www'], // Directories the warmup may compile from. Defaults to the document root.
+    ],
+    'remoteservers' => [
+        // Other PHP servers whose OPcache, APCu and Realpath cache to monitor (read-only), each one runs pca-remote.php.
+        /*[
+            'name' => 'Web 2', // The server name (optional).
+            'url' => 'https://web2.example.com/pca-remote.php',
+            'token' => '', // The same token as in pca-remote.php on that server.
+            //'timeout' => 3, // In seconds (optional). Default 3.
+            //'ssl' => ['cafile' => 'ca.pem', 'verify_peer' => true], // SSL options https://www.php.net/manual/en/context.ssl.php (optional).
+        ],*/
+    ],
+    // Access
+    //'readonly' => true, // Block all destructive actions (deleting, editing, consoles, ...) - default false.
+    'console' => true, // Remove the consoles - default true.
+    'authusers' => [
+        // Auth is enabled when at least one user is defined. Passwords can be `password_hash()` hashes.
+        //'admin' => 'your-password',
+    ],
+    //'settings' => true, // Show the settings modal (servers and options), saved to 'settingsfile' and loaded over this file. With auth enabled only logged-in users can save - default false.
+    //'settingsfile' => __DIR__.'/tmp/settings.php', // Where the settings modal saves, it can contain passwords - default tmpdir/settings.php.
+    'authwarning' => true, // Show a notice when no user is defined in 'authusers', it can also set the first one. Closing it hides the notice for a month - default true.
+    // Security
+    //'authtoken' => '', // Token for the metrics cronjob, only used when auth is enabled. Generate a long random one, e.g. `php -r "echo bin2hex(random_bytes(32));"`.
+    'securityheaders' => true, // Send CSP, X-Frame-Options, X-Content-Type-Options and Referrer-Policy - default true.
+    //'allowedhosts' => ['127.0.0.1', 'localhost'], // Refuse requests with any other Host or Origin (port is ignored). Recommended without auth, it protects against DNS rebinding - default [] (any host).
     // Decoding / Encoding functions
     'converters' => [
         'gzcompress' => [
-            'view' => static fn(string $value): ?string => @gzuncompress($value) !== false ? gzuncompress($value) : null,
-            'save' => static fn(string $value): string => gzcompress($value),
+            'view' => static fn (string $value): ?string => @gzuncompress($value) !== false ? gzuncompress($value) : null,
+            'save' => static fn (string $value): string => gzcompress($value),
         ],
         'gzencode' => [
-            'view' => static fn(string $value): ?string => @gzdecode($value) !== false ? gzdecode($value) : null,
-            'save' => static fn(string $value): string => gzencode($value),
+            'view' => static fn (string $value): ?string => @gzdecode($value) !== false ? gzdecode($value) : null,
+            'save' => static fn (string $value): string => gzencode($value),
         ],
         'gzdeflate' => [
-            'view' => static fn(string $value): ?string => @gzinflate($value) !== false ? gzinflate($value) : null,
-            'save' => static fn(string $value): string => gzdeflate($value),
+            'view' => static fn (string $value): ?string => @gzinflate($value) !== false ? gzinflate($value) : null,
+            'save' => static fn (string $value): string => gzdeflate($value),
         ],
         'zlib' => [
-            'view' => static fn(string $value): ?string => @zlib_decode($value) !== false ? zlib_decode($value) : null,
-            'save' => static fn(string $value): string => zlib_encode($value, ZLIB_ENCODING_DEFLATE),
+            'view' => static fn (string $value): ?string => @zlib_decode($value) !== false ? zlib_decode($value) : null,
+            'save' => static fn (string $value): string => zlib_encode($value, ZLIB_ENCODING_DEFLATE),
         ],
         /*'gz_magento' => [
             'view' => static function (string $value): ?string {
@@ -141,19 +151,24 @@ return [
         },
     ],
     // Customizations
-    //'timezone'       => 'Europe/Bratislava', // Leave empty (or commented out) to get it automatically obtained.
+    //'timezone' => 'Europe/Bratislava', // Leave empty (or commented out) to get it automatically obtained.
     'timeformat' => 'd. m. Y H:i:s',
     'decimalsep' => ',',
     'thousandssep' => ' ',
-    'listview' => 'table', // table/tree - default key list view
+    'listview' => 'table', // table/tree/namespaces - default key list view
+    'nsperpage' => 100, // Number of namespaces per page in namespace view - default 100
+    'nstitlekeys' => 25, // Namespaces with up to this many direct keys list their names on hover - default 25
+    'keymodal' => false, // Open the key view in a modal instead of a separate page - default false
+    'sortthreshold' => 100_000, // Above this many keys a column sort only orders the page on screen, sorting them all would need too much memory. 0 disables the limit - default 100_000
     'panelrefresh' => 30, // In seconds, refresh interval for panels - default 30
     'metricsrefresh' => 60, // In seconds, refresh interval for metrics - default 60
-    'nsperpage' => 100, // Number of namespaces per page in namespace view (optional)
-    'nstitlekeys' => 25, // Max keys in a namespace to show the list in title attribute - default 25
-    'metricstab' => 1440, // Default tab in metrics, 60 - Last hour, 1440 - Last day, 10080 - Last week, 43200 - Last month - default 1440
+    'metricstab' => '1d', // Default tab in metrics, 1h - Last hour, 1d - Last day, 1w - Last week, 1m - Last month - default 1d
+    'liverefresh' => 2, // In seconds, sampling interval for the live mode toggle in metrics (1-60) - default 2
+    'metricsmaxage' => 30, // In days, how long the collected metrics are kept. 0 keeps everything - default 30
     'hash' => 'pca', // Any random string to secure a metrics DB file.
-    'metricsdir' => __DIR__ . '/tmp/metrics', // Directory for metrics DB files.
-    'twigcache' => __DIR__ . '/tmp/twig', // Directory for Twig cache files.
-    //'pcapath'        => 'vendor/robinn/phpcacheadmin/', // Path to the package when installed via composer. Used for assets.
-    //'url'            => '/', // URL to the dashboard when installed via composer, e.g., /phpcacheadmin
+    'tmpdir' => __DIR__.'/tmp', // Directory for temporary files.
+    'metricsdir' => __DIR__.'/tmp/metrics', // Directory for metrics DB files.
+    'twigcache' => __DIR__.'/tmp/twig', // Directory for Twig cache files.
+    //'pcapath' => 'vendor/robinn/phpcacheadmin/', // Path to the package when installed via composer. Used for assets.
+    //'url' => '/', // URL to the dashboard when installed via composer, e.g., /phpcacheadmin
 ];

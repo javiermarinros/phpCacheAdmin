@@ -12,13 +12,169 @@ use Exception;
 
 trait RedisExtra {
     /**
-     * @return array<int, string>
+     * @var array<int|string, mixed>|null
      */
-    public function getInfoSections(): array {
-        return [
-            'server', 'clients', 'memory', 'persistence', 'threads', 'stats', 'replication', 'cpu',
-            'commandstats', 'latencystats', 'cluster', 'keyspace', 'errorstats',
-        ];
+    private ?array $info_cache = null;
+
+    /**
+     * @var array<int, array<string, int|string>>|null
+     */
+    private ?array $modules_cache = null;
+
+    /**
+     * HEXPIRE and HPERSIST reply with one value per field; anything above zero means it was applied.
+     */
+    protected function hashFieldExpireApplied(mixed $reply): bool {
+        return is_array($reply) && is_numeric($reply[0] ?? null) && (int) $reply[0] > 0;
+    }
+
+    /**
+     * HTTL replies with one value per field, -1 when the field never expires and -2 when it is gone.
+     *
+     * @param array<int, string> $fields
+     *
+     * @return array<string, int>
+     */
+    protected function parseHashFieldTtl(mixed $reply, array $fields): array {
+        if (!is_array($reply)) {
+            return [];
+        }
+
+        $ttls = [];
+
+        foreach (array_values($fields) as $index => $field) {
+            $ttl = $reply[$index] ?? null;
+
+            if (is_numeric($ttl) && (int) $ttl > 0) {
+                $ttls[$field] = (int) $ttl;
+            }
+        }
+
+        return $ttls;
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    public function parseClientList(string $raw, ?string $self_id = null, ?string $node = null): array {
+        $clients = [];
+
+        foreach (preg_split('/\r?\n/', trim($raw)) as $line) {
+            $client = [];
+
+            foreach (explode(' ', trim($line)) as $pair) {
+                if (!str_contains($pair, '=')) {
+                    continue;
+                }
+
+                [$field, $value] = explode('=', $pair, 2);
+                $client[$field] = $value;
+            }
+
+            if (($client['id'] ?? '') === '') {
+                continue;
+            }
+
+            $client['self'] = $self_id !== null && $client['id'] === $self_id;
+
+            if ($node !== null) {
+                $client['node'] = $node;
+            }
+
+            $clients[] = $client;
+        }
+
+        return $clients;
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    public function parseLatencyLatest(mixed $reply, ?string $node = null): array {
+        if (!is_array($reply)) {
+            return [];
+        }
+
+        $events = [];
+
+        foreach ($reply as $event) {
+            if (!is_array($event)) {
+                continue;
+            }
+
+            if (count($event) < 4) {
+                continue;
+            }
+
+            if ((string) $event[0] === '') {
+                continue;
+            }
+
+            $events[] = [
+                'event' => (string) $event[0],
+                'time'  => (int) $event[1],
+                'last'  => (int) $event[2],
+                'max'   => (int) $event[3],
+                'node'  => $node ?? '',
+            ];
+        }
+
+        return $events;
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    public function parseLatencyHistory(mixed $reply, ?string $node = null): array {
+        if (!is_array($reply)) {
+            return [];
+        }
+
+        $samples = [];
+
+        foreach ($reply as $sample) {
+            if (!is_array($sample)) {
+                continue;
+            }
+
+            if (count($sample) < 2) {
+                continue;
+            }
+
+            $samples[] = ['time' => (int) $sample[0], 'ms' => (int) $sample[1], 'node' => $node ?? ''];
+        }
+
+        return $samples;
+    }
+
+    /**
+     * Parse the raw INFO output into sections.
+     * A single 'INFO all' call is a lot faster than requesting every section individually.
+     *
+     * @return array<string, array<string, string>>
+     */
+    public function parseInfoOutput(string $raw): array {
+        $info = [];
+        $section = 'server'; // INFO always starts with a section header, just in case
+
+        foreach (preg_split('/\r?\n/', $raw) as $line) {
+            if ($line === '') {
+                continue;
+            }
+
+            if ($line[0] === '#') {
+                $section = strtolower(trim(substr($line, 1)));
+                continue;
+            }
+
+            $pos = strpos($line, ':');
+
+            if ($pos !== false) {
+                $info[$section][substr($line, 0, $pos)] = substr($line, $pos + 1);
+            }
+        }
+
+        return $info;
     }
 
     /**
@@ -28,7 +184,7 @@ trait RedisExtra {
         /** @var array<string, string|array<int, string>> $info */
         $info = $this->getInfo($section);
 
-        return array_map(static function ($value): array {
+        return array_map(static function (array|string $value): array {
             // Cluster mode
             if (is_array($value)) {
                 $aggregated = [];
@@ -42,26 +198,10 @@ trait RedisExtra {
                 return $aggregated;
             }
 
-            parse_str(str_replace(',', '&', (string) $value), $parsed);
+            parse_str(str_replace(',', '&', $value), $parsed);
 
             return $parsed;
         }, $info);
-    }
-
-    /**
-     * @throws Exception
-     */
-    public function jsonGet(string $key): string {
-        return $this->rawCommand('JSON.GET', $key);
-    }
-
-    /**
-     * @throws Exception
-     */
-    public function jsonSet(string $key, mixed $value): bool {
-        $raw = $this->rawCommand('JSON.SET', $key, '$', $value);
-
-        return $raw === true || $raw === 'OK';
     }
 
     /**
@@ -70,17 +210,21 @@ trait RedisExtra {
      * @throws Exception
      */
     public function getModules(): array {
-        static $modules = [];
+        if ($this->modules_cache !== null) {
+            return $this->modules_cache;
+        }
 
         try {
-            $list = $this->rawCommand('MODULE', 'LIST'); // require Redis >= 4.0
+            $list = $this->moduleList(); // require Redis >= 4.0
         } catch (Exception) {
-            return [];
+            return $this->modules_cache = [];
         }
 
         if (!is_array($list) || $list === []) {
-            return [];
+            return $this->modules_cache = [];
         }
+
+        $modules = [];
 
         foreach ($list as $module) {
             $modules[] = [
@@ -89,7 +233,14 @@ trait RedisExtra {
             ];
         }
 
-        return $modules;
+        return $this->modules_cache = $modules;
+    }
+
+    /**
+     * @throws Exception
+     */
+    protected function moduleList(): mixed {
+        return $this->rawCommand('MODULE', 'LIST');
     }
 
     /**
@@ -100,6 +251,31 @@ trait RedisExtra {
     }
 
     /**
+     * Parse a PUBSUB NUMSUB reply (flat or associative) into channel => subscribers pairs.
+     *
+     * @param array<int|string, mixed> $reply
+     *
+     * @return array<string, int>
+     */
+    public function parseNumSubReply(array $reply): array {
+        $channels = [];
+
+        if (array_is_list($reply)) {
+            $count = count($reply);
+
+            for ($i = 0; $i + 1 < $count; $i += 2) {
+                $channels[(string) $reply[$i]] = (int) $reply[$i + 1];
+            }
+        } else {
+            foreach ($reply as $channel => $subscribers) {
+                $channels[(string) $channel] = (int) $subscribers;
+            }
+        }
+
+        return $channels;
+    }
+
+    /**
      * Helper function for cluster mode.
      *
      * @param array<string, array<string, mixed>> $aggregated
@@ -107,7 +283,7 @@ trait RedisExtra {
      *
      * @return array<string, array<string, mixed>>
      */
-    private function aggregatedData(array $aggregated, ?array $combine = null): array {
+    public function aggregatedData(array $aggregated, ?array $combine = null): array {
         $combined_info = [];
 
         foreach ($aggregated as $section_name => $section_data) {
@@ -136,7 +312,7 @@ trait RedisExtra {
      * @param list<mixed>       $values
      * @param list<string>|null $combine
      */
-    private function combineValues(string $key, array $values, ?array $combine): mixed {
+    public function combineValues(string $key, array $values, ?array $combine): mixed {
         $unique = array_unique($values);
 
         if (count($unique) === 1) {
@@ -158,5 +334,14 @@ trait RedisExtra {
         }
 
         return $values;
+    }
+
+    /**
+     * VEMB returns the numbers as a mix of strings and floats, depending on the client.
+     *
+     * @return array<int, float>
+     */
+    public function parseVectorEmbedding(mixed $reply): array {
+        return is_array($reply) ? array_map(static fn (mixed $value): float => (float) $value, array_values($reply)) : [];
     }
 }

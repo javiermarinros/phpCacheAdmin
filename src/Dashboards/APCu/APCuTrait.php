@@ -10,306 +10,151 @@ namespace RobiNN\Pca\Dashboards\APCu;
 
 use APCUIterator;
 use RobiNN\Pca\Config;
-use RobiNN\Pca\Format;
+use RobiNN\Pca\Csrf;
 use RobiNN\Pca\Helpers;
 use RobiNN\Pca\Http;
 use RobiNN\Pca\Paginator;
-use RobiNN\Pca\Value;
 
 trait APCuTrait {
-    /**
-     * @return array<int|string, mixed>
-     */
-    private function getPanelsData(): array {
-        $info = apcu_cache_info(true);
-        $memory_info = apcu_sma_info(true);
+    use APCuPanels;
+    use APCuAnalysis;
+    use APCuHealth;
+    use APCuConfiguration;
+    use APCuKeyView;
+    use APCuKeysList;
 
-        $total_memory = $memory_info['num_seg'] * $memory_info['seg_size'];
-        $memory_used = $total_memory - $memory_info['avail_mem'];
-        $memory_usage = round(($memory_used / $total_memory) * 100, 2);
-
-        $num_hits = (int) $info['num_hits'];
-        $num_misses = (int) $info['num_misses'];
-        $hit_rate = $num_hits !== 0 ? round(($num_hits / ($num_hits + $num_misses)) * 100, 2) : 0;
-
-        return [
-            [
-                'title'    => 'APCu extension v'.phpversion('apcu'),
-                'moreinfo' => true,
-                'data'     => [
-                    'Start time'       => Format::time($info['start_time']),
-                    'Uptime'           => Format::seconds(time() - $info['start_time']),
-                    'Cache full count' => $info['expunges'],
-                ],
-            ],
-            [
-                'title' => 'Memory',
-                'data'  => [
-                    'Type'  => $info['memory_type'].' - '.$memory_info['num_seg'].' segment(s)',
-                    'Total' => Format::bytes((int) $total_memory, 0),
-                    ['Used', Format::bytes((int) $memory_used).' ('.$memory_usage.'%)', $memory_usage],
-                    'Free'  => Format::bytes((int) $memory_info['avail_mem']),
-                ],
-            ],
-            [
-                'title' => 'Stats',
-                'data'  => [
-                    'Slots'    => $info['num_slots'],
-                    'Keys'     => Format::number((int) $info['num_entries']),
-                    ['Hits / Misses', Format::number($num_hits).' / '.Format::number($num_misses).' (Rate '.$hit_rate.'%)', $hit_rate, 'higher'],
-                    'Expunges' => Format::number((int) $info['expunges']),
-                ],
-            ],
-        ];
+    public function separator(): string {
+        return (string) Config::get('apcu.separator', ':');
     }
 
-    private function moreInfo(): string {
-        $info = (array) apcu_cache_info(true);
+    /**
+     * @var array<string, string>
+     */
+    private array $tabs = [
+        'keys'     => 'Keys',
+        'analysis' => 'Analysis',
+        'health'   => 'Health',
+        'moreinfo' => 'More info',
+    ];
 
-        foreach (apcu_sma_info(true) as $mem_name => $mem_value) {
+    private function currentTab(): string {
+        $tab = Http::get('tab', '');
+
+        return array_key_exists($tab, $this->tabs) ? $tab : (string) array_key_first($this->tabs);
+    }
+
+    /**
+     * The keys are the largest part of the response, so they are only requested for the tabs that show them.
+     *
+     * @return array<int, string>
+     */
+    private function keysFlag(): array {
+        return in_array($this->currentTab(), ['keys', 'analysis'], true) ? ['keys'] : [];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function cacheInfo(): array {
+        if ($this->remote === null) {
+            return (array) apcu_cache_info(true);
+        }
+
+        return (array) ($this->remote->fetched('apcu')['cache_info'] ?? []);
+    }
+
+    /**
+     * With the blocklists, the fragmentation and the memory map are computed from them.
+     *
+     * @return array<string, mixed>
+     */
+    private function smaInfo(): array {
+        if ($this->remote === null) {
+            return apcu_sma_info();
+        }
+
+        return (array) ($this->remote->fetched('apcu')['sma_info'] ?? []);
+    }
+
+    /**
+     * The same fields on both, the iterator does not have to hold every entry at once.
+     *
+     * @return APCUIterator|array<int, array<string, mixed>>
+     */
+    public function entries(): APCUIterator|array {
+        if ($this->remote === null) {
+            $fields = APC_ITER_KEY | APC_ITER_TTL | APC_ITER_MEM_SIZE | APC_ITER_NUM_HITS | APC_ITER_ATIME | APC_ITER_CTIME;
+
+            return new APCUIterator(null, $fields, 0, APC_LIST_ACTIVE);
+        }
+
+        return (array) ($this->remote->fetched('apcu')['keys'] ?? []);
+    }
+
+    public function apcuVersion(): string {
+        return $this->remote !== null ? (string) ($this->remote->fetched('apcu')['version'] ?? '') : (string) phpversion('apcu');
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function moreinfoTab(): array {
+        $info = $this->cacheInfo();
+
+        foreach ($this->smaInfo() as $mem_name => $mem_value) {
             if (!is_array($mem_value)) {
                 $info['memory'][$mem_name] = $mem_value;
             }
         }
 
-        $info += Helpers::getExtIniInfo('apcu');
+        $info += $this->remote !== null ? ['ini_config' => (array) ($this->remote->fetched('apcu')['ini'] ?? [])] : Helpers::getExtIniInfo('apcu');
 
-        return $this->template->render('partials/info_table', [
-            'panel_title' => 'APCu Info',
-            'array'       => Helpers::convertTypesToString($info),
-        ]);
+        return [
+            'array'        => Helpers::convertTypesToString($info),
+            'descriptions' => $this->configDescriptions(),
+        ];
     }
 
-    private function getKeySize(string $key): int {
-        $cache_info = apcu_cache_info();
-
-        // For some reason apcu_key_info() does not contain the key size
-        foreach ($cache_info['cache_list'] as $entry) {
-            if ($entry['info'] === $key) {
-                return $entry['mem_size'];
+    /**
+     * @return array<string, mixed>
+     */
+    private function keysTab(): array {
+        if (isset($_POST['submit_import_key']) && !$this->isRemote()) {
+            if (Csrf::validateToken(Http::post('csrf_token', ''))) {
+                Helpers::import(
+                    static fn (string $key): bool => apcu_exists($key),
+                    static function (string $key, string $value, int $ttl): bool {
+                        return apcu_store($key, unserialize(base64_decode($value), ['allowed_classes' => false]), $ttl);
+                    }
+                );
+            } else {
+                echo Helpers::alert('Invalid CSRF token.', 'error');
             }
         }
 
-        return 0;
-    }
-
-    private function viewKey(): string {
-        $key = Http::get('key', '');
-
-        if (apcu_exists($key) === false) {
-            Http::redirect();
-        }
-
-        $value = Helpers::mixedToString(apcu_fetch($key));
-        $key_data = apcu_key_info($key);
-        $ttl = $key_data['ttl'] === 0 ? -1 : $key_data['creation_time'] + $key_data['ttl'] - time();
-
-        if (isset($_GET['export'])) {
-            Helpers::export(
-                [['key' => $key, 'ttl' => $ttl]],
-                $key,
-                static fn (string $key): string => base64_encode(serialize(apcu_fetch($key)))
-            );
-        }
-
-        if (isset($_GET['delete'])) {
-            apcu_delete($key);
-            Http::redirect();
-        }
-
-        [$formatted_value, $encode_fn, $is_formatted] = Value::format($value);
-
-        return $this->template->render('partials/view_key', [
-            'key'        => $key,
-            'value'      => $formatted_value,
-            'ttl'        => Format::seconds($ttl),
-            'size'       => Format::bytes($this->getKeySize($key)),
-            'encode_fn'  => $encode_fn,
-            'formatted'  => $is_formatted,
-            'edit_url'   => Http::queryString(['ttl'], ['form' => 'edit', 'key' => $key]),
-            'export_url' => Http::queryString(['ttl', 'view', 'p', 'key'], ['export' => 'key']),
-            'delete_url' => Http::queryString(['view'], ['delete' => 'key', 'key' => $key]),
-        ]);
-    }
-
-    public function saveKey(): void {
-        $key = Http::post('key', '');
-        $expire = Http::post('expire', 0);
-        $old_key = Http::post('old_key', '');
-        $value = Value::converter(Http::post('value', ''), Http::post('encoder', ''), 'save');
-
-        if ($old_key !== '' && $old_key !== $key) { // @phpstan-ignore-line
-            apcu_delete($old_key);
-        }
-
-        apcu_store($key, $value, $expire);
-
-        Http::redirect([], ['view' => 'key', 'key' => $key]);
-    }
-
-    /**
-     * Add/edit form.
-     */
-    private function form(): string {
-        $key = Http::get('key', '');
-        $expire = 0;
-
-        $encoder = Http::get('encoder', 'none');
-        $value = Http::post('value', '');
-
-        if (isset($_GET['key']) && apcu_exists($key)) {
-            $value = Helpers::mixedToString(apcu_fetch($key));
-            $info = apcu_key_info($key);
-            $expire = $info['ttl'];
-        }
-
-        if (isset($_POST['submit'])) {
-            $this->saveKey();
-        }
-
-        $value = Value::converter($value, $encoder, 'view');
-
-        return $this->template->render('partials/form', [
-            'exp_attr' => 'min="0"',
-            'key'      => $key,
-            'value'    => $value,
-            'expire'   => $expire,
-            'encoders' => Config::getEncoders(),
-            'encoder'  => $encoder,
-        ]);
-    }
-
-    /**
-     * @return array<int, array<string, string|int>>
-     */
-    public function getAllKeys(): array {
-        $search = Http::get('s', '', true);
-        $this->template->addGlobal('search_value', $search);
-
-        $keys = [];
-        $time = time();
-
-        $iterator = new APCUIterator('/.*/', APC_ITER_ALL, 0, APC_LIST_ACTIVE);
-
-        foreach ($iterator as $item) {
-            $key = $item['key'];
-
-            if ($search !== '' && !Helpers::matchSearchPattern($key, $search)) {
-                continue;
-            }
-
-            $ttl = $item['ttl'];
-            $keys[] = [
-                'key'           => $key,
-                'mem_size'      => $item['mem_size'] ?? 0,
-                'num_hits'      => $item['num_hits'] ?? 0,
-                'access_time'   => $item['access_time'] ?? 0,
-                'creation_time' => $item['creation_time'] ?? 0,
-                'ttl'           => $ttl === 0 ? 'Doesn\'t expire' : ($item['creation_time'] + $ttl - $time),
-            ];
-        }
-
-        return $keys;
-    }
-
-    /**
-     * @param array<int|string, mixed> $keys
-     *
-     * @return array<int, array<string, string|int>>
-     */
-    public function keysTableView(array $keys): array {
-        $formatted_keys = [];
-
-        foreach ($keys as $key_data) {
-            $formatted_keys[] = [
-                'key'    => $key_data['key'],
-                'base64' => true,
-                'info'   => [
-                    'link_title'         => $key_data['key'],
-                    'bytes_size'         => $key_data['mem_size'],
-                    'number_hits'        => $key_data['num_hits'],
-                    'timediff_last_used' => $key_data['access_time'],
-                    'time_created'       => $key_data['creation_time'],
-                    'ttl'                => $key_data['ttl'],
-                ],
-            ];
-        }
-
-        return Helpers::sortKeys($this->template, $formatted_keys);
-    }
-
-    /**
-     * @param array<int|string, mixed> $keys
-     *
-     * @return array<int, array<string, string|int>>
-     */
-    public function keysTreeView(array $keys): array {
-        $separator = Config::get('apcuseparator', ':');
-        $this->template->addGlobal('separator', $separator);
-
-        $tree = [];
-
-        foreach ($keys as $key_data) {
-            $key = $key_data['key'];
-            $parts = explode($separator, $key);
-
-            /** @var array<int|string, mixed> $current */
-            $current = &$tree;
-            $path = '';
-
-            foreach ($parts as $i => $part) {
-                $path = $path !== '' && $path !== '0' ? $path.$separator.$part : $part;
-
-                if ($i === count($parts) - 1) { // check last part
-                    $current[] = [
-                        'type'   => 'key',
-                        'name'   => $part,
-                        'key'    => $key,
-                        'base64' => true,
-                        'info'   => [
-                            'bytes_size'         => $key_data['mem_size'],
-                            'number_hits'        => $key_data['num_hits'],
-                            'timediff_last_used' => $key_data['access_time'],
-                            'time_created'       => $key_data['creation_time'],
-                            'ttl'                => $key_data['ttl'],
-                        ],
-                    ];
-                } else {
-                    $current[$part] ??= [
-                        'type' => 'folder',
-                        'name' => $part,
-                        'path' => $path,
-                        'children' => [],
-                        'expanded' => false,
-                    ];
-
-                    $current = &$current[$part]['children'];
-                }
-            }
-        }
-
-        Helpers::calculateStats($tree);
-
-        return $tree;
-    }
-
-    private function mainDashboard(): string {
-        if (isset($_POST['submit_import_key'])) {
-            Helpers::import(
-                static fn (string $key): bool => apcu_exists($key),
-                static function (string $key, string $value, int $ttl): bool {
-                    return apcu_store($key, unserialize(base64_decode($value), ['allowed_classes' => false]), $ttl);
-                }
-            );
-        }
+        Helpers::importResultAlert();
 
         $keys = $this->getAllKeys();
 
-        if (isset($_GET['export_btn'])) {
-            Helpers::export($keys, 'apcu_backup', static fn (string $key): string => base64_encode(serialize(apcu_fetch($key))));
+        if (isset($_GET['export_btn']) && !$this->isRemote()) {
+            $export_keys = array_map(static fn (array $item): array => [
+                'key'  => $item['key'],
+                'info' => ['ttl' => (int) ($item['ttl'] ?? 0)],
+            ], $keys);
+
+            Helpers::export($export_keys, 'apcu_backup', static fn (string $key): string => base64_encode(serialize(apcu_fetch($key))));
         }
 
-        $paginator = new Paginator($this->template, $keys);
+        $keys = Helpers::sortBeforePaginate($keys, [
+            'link_title'         => static fn (array $item): string => (string) ($item['key'] ?? ''),
+            'bytes_size'         => static fn (array $item): int => (int) ($item['mem_size'] ?? 0),
+            'number_hits'        => static fn (array $item): int => (int) ($item['num_hits'] ?? 0),
+            'timediff_last_used' => static fn (array $item): int => (int) ($item['access_time'] ?? 0),
+            'time_created'       => static fn (array $item): int => (int) ($item['creation_time'] ?? 0),
+            'ttl'                => static fn (array $item): int => (int) ($item['ttl'] ?? 0),
+        ]);
+
+        $paginator = new Paginator($keys);
         $paginated_keys = $paginator->getPaginated();
 
         if (Http::get('view', Config::get('listview', 'table')) === 'tree') {
@@ -320,13 +165,35 @@ trait APCuTrait {
 
         unset($keys, $paginated_keys);
 
-        $info = apcu_cache_info(true);
+        $info = $this->cacheInfo();
 
-        return $this->template->render('dashboards/apcu', [
+        return [
             'keys'      => $keys_to_display,
             'all_keys'  => (int) $info['num_entries'],
             'paginator' => $paginator->render(),
-            'view_key'  => Http::queryString([], ['view' => 'key', 'key' => '__key__']),
-        ]);
+            'view_key'  => $this->isRemote() ? null : Http::queryString([], ['view' => 'key', 'key' => '__key__']),
+            'is_remote' => $this->isRemote(),
+        ];
+    }
+
+    private function mainDashboard(): string {
+        $tab = $this->currentTab();
+
+        $tab_data = match ($tab) {
+            'keys' => $this->keysTab(),
+            'analysis' => $this->analysisTab(),
+            'health' => ['data' => $this->healthTab(), 'tpl' => 'partials/health'],
+            'moreinfo' => ['data' => $this->moreinfoTab(), 'tpl' => 'partials/info_table'],
+            default => [],
+        };
+
+        $tpl = $tab_data['tpl'] ?? 'dashboards/apcu/'.$tab;
+        $data = $tab_data['data'] ?? $tab_data;
+
+        if (isset($data['tab_error'])) {
+            return htmlspecialchars((string) $data['tab_error']);
+        }
+
+        return $this->template->render($tpl, $data);
     }
 }

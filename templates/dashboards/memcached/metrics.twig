@@ -1,60 +1,86 @@
-{{ include('components/tabs.twig', {
-    tabs: true,
-    pills: true,
-    selected: config('metricstab', 1440),
-    links: {
-        60: 'Last hour',
-        1440: 'Last day',
-        10080: 'Last week',
-        43200: 'Last month',
-    },
-}) }}
+{% if health is not empty %}
+    <div class="mb-4">
+        {{ include('partials/health.twig', {checks: health, grid: 'grid-cols-1 sm:grid-cols-2 xl:grid-cols-4'}) }}
+    </div>
+{% endif %}
 
-<div class="gap-4 md:grid md:grid-cols-4">
-    <div class="col-span-4 p-4 mb-2 bg-white rounded-md border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
+{{ include('partials/metrics_header.twig', {dashboard: 'memcached', sampling: 'one "stats" command'}) }}
+
+{{ include('partials/metrics_tiles.twig', {tiles: [
+    {id: 'ops', label: 'Operations'},
+    {id: 'hit_rate', label: 'Hit rate'},
+    {id: 'traffic', label: 'Traffic'},
+    {id: 'evictions', label: 'Evictions'},
+]}) }}
+
+<div class="gap-4 lg:grid lg:grid-cols-4">
+    <div class="col-span-4 p-4 mb-2 card">
         <div id="hit_rate_chart" class="h-90"></div>
     </div>
-    <div class="col-span-2 p-4 mb-2 bg-white rounded-md border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
+    <div class="col-span-2 p-4 mb-2 card">
         <div id="memory_chart" class="h-90"></div>
     </div>
-    <div class="col-span-2 p-4 mb-2 bg-white rounded-md border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
+    <div class="col-span-2 p-4 mb-2 card">
         <div id="items_chart" class="h-90"></div>
     </div>
-    <div class="col-span-2 p-4 mb-2 bg-white rounded-md border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
+    <div class="col-span-2 p-4 mb-2 card">
         <div id="request_rate_chart" class="h-90"></div>
     </div>
-    <div class="col-span-2 p-4 mb-2 bg-white rounded-md border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
+    <div class="col-span-2 p-4 mb-2 card">
         <div id="request_dist_chart" class="h-90"></div>
     </div>
-    <div class="col-span-2 p-4 mb-2 bg-white rounded-md border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
+    <div class="col-span-2 p-4 mb-2 card">
         <div id="connections_chart" class="h-90"></div>
     </div>
-    <div class="col-span-2 p-4 mb-2 bg-white rounded-md border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
+    <div class="col-span-2 p-4 mb-2 card">
         <div id="traffic_chart" class="h-90"></div>
     </div>
 </div>
 
-<script src="{{ config('pcapath', '') }}assets/js/echarts.min.js"></script>
-<script>
+<script src="{{ asset('assets/js/echarts.min.js') }}"></script>
+<script nonce="{{ nonce }}">
     document.addEventListener('DOMContentLoaded', () => {
         const initial_theme = document.documentElement.classList.contains('dark') ? 'dark' : null;
 
         const chart_config = {
-            hit_rate: echarts.init(document.getElementById('hit_rate_chart'), initial_theme, {renderer: 'svg'}),
-            memory: echarts.init(document.getElementById('memory_chart'), initial_theme, {renderer: 'svg'}),
-            items: echarts.init(document.getElementById('items_chart'), initial_theme, {renderer: 'svg'}),
-            request_rate: echarts.init(document.getElementById('request_rate_chart'), initial_theme, {renderer: 'svg'}),
-            request_dist: echarts.init(document.getElementById('request_dist_chart'), initial_theme, {renderer: 'svg'}),
-            connections: echarts.init(document.getElementById('connections_chart'), initial_theme, {renderer: 'svg'}),
-            traffic: echarts.init(document.getElementById('traffic_chart'), initial_theme, {renderer: 'svg'}),
+            hit_rate: echarts.init(document.getElementById('hit_rate_chart'), initial_theme, {renderer: 'canvas'}),
+            memory: echarts.init(document.getElementById('memory_chart'), initial_theme, {renderer: 'canvas'}),
+            items: echarts.init(document.getElementById('items_chart'), initial_theme, {renderer: 'canvas'}),
+            request_rate: echarts.init(document.getElementById('request_rate_chart'), initial_theme, {renderer: 'canvas'}),
+            request_dist: echarts.init(document.getElementById('request_dist_chart'), initial_theme, {renderer: 'canvas'}),
+            connections: echarts.init(document.getElementById('connections_chart'), initial_theme, {renderer: 'canvas'}),
+            traffic: echarts.init(document.getElementById('traffic_chart'), initial_theme, {renderer: 'canvas'}),
         };
 
         const HIT_RATE_COMMANDS = ['get', 'delete', 'incr', 'decr', 'cas', 'touch'];
         const REQUEST_RATE_COMMANDS = ['get', 'set', 'delete', 'incr', 'decr', 'cas', 'touch', 'flush'];
 
+        const render_tiles = (point) => {
+            const per_second = (value) => number_format(value, value > 0 && value < 10 ? 2 : 0) + '/s';
+
+            metric_tile(
+                'ops',
+                per_second(point.request_rates.overall),
+                `get ${per_second(point.request_rates.get)}, set ${per_second(point.request_rates.set)}`
+            );
+            metric_tile('hit_rate', number_format(point.hit_rates.overall, 2) + '%', `get ${number_format(point.hit_rates.get, 2)}%`);
+            metric_tile(
+                'traffic',
+                format_bytes(point.traffic.received_rate) + '/s in',
+                `${format_bytes(point.traffic.sent_rate)}/s out`
+            );
+            metric_tile(
+                'evictions',
+                per_second(point.eviction_rate),
+                `${per_second(point.expired_rate)} expired, ${number_format(point.stored_items)} items stored`
+            );
+        };
+
         const render_charts = (data) => {
             if (!data || data.length === 0) return;
             const timestamps = data.map(p => p.timestamp.split(' ')[1]);
+
+            render_tiles(data[data.length - 1]);
 
             const hit_rate_series = HIT_RATE_COMMANDS.map(cmd => ({
                 name: cmd,
@@ -155,6 +181,6 @@
             }, timestamps);
         };
 
-        init_metrics(render_charts, chart_config);
+        new Metrics(render_charts, chart_config);
     });
 </script>

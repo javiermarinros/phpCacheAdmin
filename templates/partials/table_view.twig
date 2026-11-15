@@ -1,11 +1,11 @@
-{% import 'components/macros.twig' as components %}
-{% set show_actions = hide_actions is not defined or hide_actions == false %}
+{% import 'components/macros.twig' as macros %}
+{% set show_actions = (hide_actions is not defined or hide_actions == false) and not readonly %}
 <div class="overflow-hidden overflow-x-auto">
     <table class="w-full text-left table-auto dark:text-gray-300">
         <thead>
         <tr class="border-t border-b border-gray-200 dark:border-gray-700 text-primary-900 dark:text-primary-400">
             {% if show_actions %}
-                <th class="py-2 px-3 pl-6 w-4" title="Check all">{{ components.checkbox('check-all', keys|length == 0) }}</th>
+                <th class="py-2 px-3 pl-6 w-4" title="Check all">{{ macros.checkbox('check-all', keys|length == 0) }}</th>
             {% endif %}
             {% for item in head_items %}
                 {% set is_active = sortcol == item.sort %}
@@ -13,7 +13,12 @@
 
                 <th class="px-3 py-2 text-xs font-bold uppercase whitespace-nowrap{{ item.class|space }}">
                     {% if item.sort %}
-                        <button type="button" class="inline-flex gap-1 items-center text-xs font-bold uppercase appearance-none cursor-pointer" {{ data_sort|raw }}>
+                        {% set page_only = item.page_sort|default(false) or page_sort_only %}
+                        {% set sort_title = page_sort_only
+                            ? 'There are too many keys to sort them all, so only the keys on this page are ordered. The limit is the sortthreshold option.'
+                            : (item.page_sort|default(false) ? 'Sorts the keys on this page.' : '') %}
+                        <button type="button" class="inline-flex gap-1 items-center text-xs font-bold uppercase appearance-none cursor-pointer"
+                                {{ sort_title ? 'title="%s"'|format(sort_title|e('html_attr'))|raw : '' }} {{ data_sort|raw }}>
                             {{ item.title }}
                             {{ svg('down', 10, (is_active ? '' : 'opacity-30') ~ (is_active and sortdir == 'asc' ? ' rotate-180' : '')) }}
                         </button>
@@ -29,32 +34,32 @@
         </thead>
         <tbody>
         {% for key in keys %}
-            <tr class="hover:bg-gray-50 dark:hover:bg-white/5" data-key="{{ key.base64 ? key.key|base64 : key.key }}">
+            <tr class="hover:bg-gray-50 dark:hover:bg-white/5" data-key="{{ key.key|base64 }}">
                 {% if show_actions %}
-                    <td class="py-2 px-3 pl-6 border-b border-gray-200 dark:border-gray-700">{{ components.checkbox('check-key') }}</td>
+                    <td class="py-2 px-3 pl-6 border-b border-gray-200 dark:border-gray-700">{{ macros.checkbox('check-key') }}</td>
                 {% endif %}
                 {% for item_key, item in key.info %}
                     {% set is_title = item_key == 'title' or (item_key == 'link_title' and view_key) %}
                     {% set td_class = is_title ? ' max-w-xs md:max-w-md truncate hover:text-clip hover:break-all hover:whitespace-normal' : '' %}
                     <td class="px-3 py-2 border-b border-gray-200 text-sm{{ td_class }}{{ classes[loop.index]|space }} dark:border-gray-700 dark:text-gray-300">
                         {% if item_key == 'link_title' and view_key %}
-                            {% set link = view_key|replace({'__key__': key.key}) %}
-                            <a class="font-semibold text-primary-500 dark:text-primary-400 dark:hover:text-primary-300 hover:text-primary-700" href="{{ link }}">
+                            {% set link = view_key|replace({__key__: key.key|url_encode}) %}
+                            <a class="font-semibold text-primary-500 dark:text-primary-400 dark:hover:text-primary-300 hover:text-primary-700" href="{{ link }}"{{ config('keymodal', false) ? ' data-view-key' : '' }}>
                                 {{ item }}
                                 {% if key.items %}
-                                    <span class="text-xs text-gray-500 dark:text-gray-400">({{ key.items }} items)</span>
+                                    <span class="text-xs text-gray-600 dark:text-gray-300">({{ key.items }} items)</span>
                                 {% endif %}
                             </a>
                         {% elseif item_key == 'type' %}
-                            {{- components.key_type(item) -}}
+                            {{- macros.key_type(item) -}}
                         {% elseif item_key starts with 'number_' %}
                             {{- item|number -}}
                         {% elseif item_key starts with 'time_' %}
                             {{- item|time -}}
                         {% elseif item_key starts with 'timediff_' and item is not empty %}
-                            <span title="{{ item|time }}" data-timediff="{{ item }}">{{- item|timediff -}}</span>
-                        {% elseif item_key starts with 'countdown_' %}
-                            <span data-ttl-expiry="{{ item }}">{{- item|countdown -}}</span>
+                            <span title="{{ item|time }}">{{- item|timediff -}}</span>
+                        {% elseif item_key == 'ttl' and item is not empty %}
+                            <span{{ is_numeric(item) ? ' data-ttl="%d"'|format(item)|raw : '' }} title="{{ is_numeric(item) ? item|seconds : item }}">{{- item|countdown -}}</span>
                         {% elseif item_key starts with 'bytes_' %}
                             {{- item|bytes -}}
                         {% else %}

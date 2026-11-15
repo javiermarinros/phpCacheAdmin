@@ -33,16 +33,12 @@ interface RedisCompatibilityInterface {
     /**
      * Alias to a scan().
      *
+     * @param int      $count SCAN COUNT hint.
+     * @param int|null $limit Max number of returned keys, defaults to $count.
+     *
      * @return array<int, string>
      */
-    public function scanKeys(string $pattern, int $count): array;
-
-    /**
-     * Alias to a scan() that also returns the cursor.
-     *
-     * @return array{cursor: int|string, keys: array<int, string>}
-     */
-    public function scanKeysWithCursor(string $pattern, int $count, int|string|null $cursor): array;
+    public function scanKeys(string $pattern, int $count, ?int $limit = null): array;
 
     /**
      * Alias to a lRem().
@@ -55,6 +51,77 @@ interface RedisCompatibilityInterface {
      * @param array<string, string> $messages
      */
     public function streamAdd(string $key, string $id, array $messages): string;
+
+    /**
+     * Alias to a xInfo('GROUPS').
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function streamGroups(string $key): array;
+
+    /**
+     * Alias to a xInfo('CONSUMERS').
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function streamConsumers(string $key, string $group): array;
+
+    /**
+     * Alias to a xPending().
+     *
+     * @return array<int, mixed>
+     */
+    public function streamPending(string $key, string $group): array;
+
+    /**
+     * Alias to a xReadGroup().
+     *
+     * @return array<string, mixed>
+     */
+    public function streamReadGroup(string $key, string $group, string $consumer, int $count): array;
+
+    /**
+     * Alias to a xGroup('CREATE').
+     */
+    public function streamCreateGroup(string $key, string $group, string $id = '0'): bool;
+
+    /**
+     * Alias to a vInfo().
+     *
+     * @return array<string, mixed>
+     */
+    public function vectorInfo(string $key): array;
+
+    /**
+     * Alias to a vRandMember().
+     *
+     * @return array<int, string>
+     */
+    public function vectorMembers(string $key, int $count): array;
+
+    /**
+     * Alias to a vEmb().
+     *
+     * @return array<int, float>
+     */
+    public function vectorEmbedding(string $key, string $element): array;
+
+    /**
+     * Alias to a vGetAttr().
+     */
+    public function vectorAttributes(string $key, string $element): string;
+
+    /**
+     * Alias to a vAdd().
+     *
+     * @param array<int, float|string> $vector
+     */
+    public function vectorAdd(string $key, string $element, array $vector, string $attributes = ''): bool;
+
+    /**
+     * Alias to a vRem().
+     */
+    public function vectorRem(string $key, string $element): bool;
 
     /**
      * Pipeline keys for better performance.
@@ -71,6 +138,25 @@ interface RedisCompatibilityInterface {
      * Requires Redis >= 4.0.0.
      */
     public function size(string $key): int;
+
+    /**
+     * Internal representation of the value, e.g., listpack or hashtable.
+     */
+    public function keyEncoding(string $key): string;
+
+    /**
+     * Time to live of hash fields in seconds. Fields that never expire are not in the result.
+     *
+     * @param array<int, string> $fields
+     *
+     * @return array<string, int>
+     */
+    public function hashFieldTtl(string $key, array $fields): array;
+
+    /**
+     * Set the time to live of a single hash field; -1 removes it.
+     */
+    public function hashFieldExpire(string $key, string $field, int $ttl): bool;
 
     /**
      * Alias to a flushDB().
@@ -100,14 +186,79 @@ interface RedisCompatibilityInterface {
     public function resetSlowlog(): bool;
 
     /**
-     * Get a list of supported commands.
+     * Get the latency events recorded by the latency monitor.
      *
-     * @return array<int, string>
+     * @return array<int, array<string, mixed>>
      */
-    public function getCommands(): array;
+    public function latencyLatest(): array;
+
+    /**
+     * Get the recorded samples of a single latency event, oldest first.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function latencyHistory(string $event): array;
+
+    /**
+     * Discard the recorded latency events. Diagnostics only, no stored data is touched.
+     */
+    public function latencyReset(): bool;
+
+    /**
+     * LATENCY DOCTOR advice, as plain text.
+     */
+    public function latencyDoctor(): string;
+
+    /**
+     * MEMORY DOCTOR advice, as plain text.
+     */
+    public function memoryDoctor(): string;
+
+    /**
+     * Check if the server supports a command.
+     */
+    public function commandExists(string $command): bool;
+
+    /**
+     * Get the connected clients with the dashboard's own connection marked.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function getClients(): array;
+
+    /**
+     * Close a client connection by its ID. Returns false when no client had that ID.
+     */
+    public function killClient(string $id): bool;
 
     /**
      * Alias to a restore().
      */
     public function restoreKeys(string $key, int $ttl, string $value): bool;
+
+    /**
+     * Get active Pub/Sub channels with subscriber counts and the number of pattern subscriptions.
+     *
+     * @return array{channels: array<string, int>, patterns: int}
+     */
+    public function pubSubStats(string $pattern = '*'): array;
+
+    /**
+     * Publish a message to a channel and get the number of receivers.
+     */
+    public function publishMessage(string $channel, string $message): int;
+
+    /**
+     * Subscribe to a pattern and collect messages for a limited time window.
+     *
+     * @return array<int, array{channel: string, message: string, time: int}>
+     */
+    public function captureMessages(string $pattern, int $seconds, int $limit): array;
+
+    /**
+     * Run a raw command entered in the console and return its reply.
+     *
+     * @param array<int, string> $args Command name and its arguments, e.g. ['GET', 'mykey'].
+     */
+    public function consoleCommand(array $args): mixed;
 }

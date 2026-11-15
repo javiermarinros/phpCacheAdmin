@@ -10,613 +10,151 @@ namespace RobiNN\Pca\Dashboards\Memcached;
 
 use PDO;
 use RobiNN\Pca\Config;
-use RobiNN\Pca\Format;
+use RobiNN\Pca\Csrf;
 use RobiNN\Pca\Helpers;
 use RobiNN\Pca\Http;
 use RobiNN\Pca\Paginator;
-use RobiNN\Pca\Value;
 
 trait MemcachedTrait {
+    use MemcachedCommands;
+    use MemcachedPanels;
+    use MemcachedHealth;
+    use MemcachedAnalysis;
+    use MemcachedSlabs;
+    use MemcachedKeyView;
+    use MemcachedKeysList;
+    use MemcachedConnections;
+    use MemcachedWatcher;
+    use MemcachedConsole;
+
     /**
-     * @return array<int|string, mixed>
+     * @var array<string, string>
      */
-    private function getPanelsData(bool $command_stats = false): array {
-        try {
-            if (class_exists(PHPMem::class)) {
-                $title = 'PHPMem v'.PHPMem::VERSION;
-            }
-
-            $info = $this->memcached->getServerStats();
-
-            $memory_usage = ($info['limit_maxbytes'] > 0) ? round(($info['bytes'] / $info['limit_maxbytes']) * 100, 2) : 0;
-
-            $stats = [
-                [
-                    'title'    => $title ?? null,
-                    'moreinfo' => true,
-                    'data'     => [
-                        'Version' => $info['version'],
-                        'Uptime'  => Format::seconds($info['uptime']),
-                    ],
-                ],
-                [
-                    'title' => 'Memory',
-                    'data'  => [
-                        'Total' => Format::bytes($info['limit_maxbytes'], 0),
-                        ['Used', Format::bytes($info['bytes']).' ('.$memory_usage.'%)', $memory_usage],
-                        'Free'  => Format::bytes($info['limit_maxbytes'] - $info['bytes']),
-                    ],
-                ],
-                [
-                    'title' => 'Keys',
-                    'data'  => [
-                        'Current'             => Format::number($info['curr_items']),
-                        'Total (since start)' => Format::number($info['total_items']),
-                        'Evictions'           => Format::number($info['evictions']),
-                        'Reclaimed'           => Format::number($info['reclaimed']),
-                        'Expired Unfetched'   => Format::number($info['expired_unfetched']),
-                        'Evicted Unfetched'   => Format::number($info['evicted_unfetched']),
-                    ],
-                ],
-                [
-                    'title' => 'Connections',
-                    'data'  => [
-                        'Current'  => Format::number($info['curr_connections']).' / '.Format::number($info['max_connections']).' max',
-                        'Total'    => Format::number($info['total_connections']),
-                        'Rejected' => Format::number($info['rejected_connections']),
-                    ],
-                ],
-            ];
-
-            if ($command_stats) {
-                return array_merge($stats, $this->commandsStatsData($info));
-            }
-
-            return $stats;
-        } catch (MemcachedException $e) {
-            return ['error' => $e->getMessage()];
-        }
-    }
+    private array $tabs = [
+        'keys'           => 'Keys',
+        'analysis'       => 'Analysis',
+        'commands_stats' => 'Commands Stats',
+        'slabs'          => 'Slabs',
+        'items'          => 'Items',
+        'metrics'        => 'Metrics',
+        'connections'    => 'Connections',
+        'watcher'        => 'Watcher',
+        'console'        => 'Console',
+        'moreinfo'       => 'More info',
+    ];
 
     /**
      * @throws MemcachedException
      */
     private function deleteAllKeys(): string {
         if ($this->memcached->flush()) {
-            return Helpers::alert($this->template, 'All keys have been removed.', 'success');
+            return Helpers::alert('All keys have been removed.', 'success');
         }
 
-        return Helpers::alert($this->template, 'An error occurred while deleting all keys.', 'error');
+        return Helpers::alert('An error occurred while deleting all keys.', 'error');
     }
 
-    private function moreInfo(): string {
+    /**
+     * @return array<string, mixed>
+     */
+    private function moreinfoTab(): array {
         try {
             $info = $this->memcached->getServerStats();
             $info += ['settings' => $this->memcached->getServerStats('settings')];
 
-            if (extension_loaded('memcached') || extension_loaded('memcache')) {
-                $memcached = extension_loaded('memcached') ? 'd' : '';
-                $info += Helpers::getExtIniInfo('memcache'.$memcached);
+            $server = $this->servers[$this->current_server];
+            if (isset($server['extension']) && $server['extension'] === true && extension_loaded('memcached')) {
+                $info += Helpers::getExtIniInfo('memcached');
             }
 
-            return $this->template->render('partials/info_table', [
-                'panel_title' => Helpers::getServerTitle($this->servers[$this->current_server]),
-                'array'       => Helpers::convertTypesToString($info),
-            ]);
+            return ['array' => Helpers::convertTypesToString($info)];
         } catch (MemcachedException $e) {
-            return $e->getMessage();
+            return ['tab_error' => $e->getMessage()];
         }
     }
 
     /**
-     * @throws MemcachedException
-     */
-    private function viewKey(): string {
-        $key = Http::get('key', '');
-
-        if (!$this->memcached->exists($key)) {
-            Http::redirect();
-        }
-
-        $info = $this->memcached->getKeyMeta($key);
-        $ttl = $info['exp'] ?? null;
-        $ttl = $ttl === 0 ? -1 : $ttl;
-
-        if (isset($_GET['export'])) {
-            Helpers::export(
-                [['key' => $key, 'ttl' => $ttl]],
-                $key,
-                fn (string $key): string => base64_encode($this->memcached->getKey($key))
-            );
-        }
-
-        if (isset($_GET['delete'])) {
-            $this->memcached->delete($key);
-            Http::redirect();
-        }
-
-        $value = $this->memcached->getKey($key);
-
-        [$formatted_value, $encode_fn, $is_formatted] = Value::format($value);
-
-        return $this->template->render('partials/view_key', [
-            'key'        => $key,
-            'value'      => $formatted_value,
-            'ttl'        => $ttl ? Format::seconds($ttl) : null,
-            'size'       => isset($info['size']) ? Format::bytes($info['size']) : null,
-            'encode_fn'  => $encode_fn,
-            'formatted'  => $is_formatted,
-            'edit_url'   => Http::queryString(['ttl'], ['form' => 'edit', 'key' => $key]),
-            'export_url' => Http::queryString(['ttl', 'view', 'p', 'key'], ['export' => 'key']),
-            'delete_url' => Http::queryString(['view'], ['delete' => 'key', 'key' => $key]),
-        ]);
-    }
-
-    /**
-     * @throws MemcachedException
-     */
-    public function saveKey(): void {
-        $key = Http::post('key', '');
-        $expire = Http::post('expire', 0);
-        $old_key = Http::post('old_key', '');
-        $value = Value::converter(Http::post('value', ''), Http::post('encoder', ''), 'save');
-
-        if ($old_key !== '' && $old_key !== $key) { // @phpstan-ignore-line
-            $this->memcached->delete($old_key);
-        }
-
-        $this->memcached->set($key, $value, $expire);
-
-        Http::redirect([], ['view' => 'key', 'ttl' => $expire, 'key' => $key]);
-    }
-
-    /**
-     * Add/edit form.
-     *
-     * @throws MemcachedException
-     */
-    private function form(): string {
-        $key = Http::get('key', '');
-        $expire = Http::get('ttl', 0);
-        $expire = $expire === -1 ? 0 : $expire;
-
-        $encoder = Http::get('encoder', 'none');
-        $value = Http::post('value', '');
-
-        if (isset($_GET['key']) && $this->memcached->exists($key)) {
-            $value = $this->memcached->getKey($key);
-        }
-
-        if (isset($_POST['submit'])) {
-            $this->saveKey();
-        }
-
-        $value = Value::converter($value, $encoder, 'view');
-
-        return $this->template->render('partials/form', [
-            'exp_attr' => 'min="0" max="2592000"',
-            'key'      => $key,
-            'value'    => $value,
-            'expire'   => $expire,
-            'encoders' => Config::getEncoders(),
-            'encoder'  => $encoder,
-        ]);
-    }
-
-    /**
-     * @return array<int, string>
-     *
-     * @throws MemcachedException
-     */
-    public function getAllKeys(): array {
-        $search = Http::get('s', '', true);
-        $this->template->addGlobal('search_value', $search);
-
-        $all_key_lines = $this->memcached->getKeys();
-
-        if ($search === '') {
-            return $all_key_lines;
-        }
-
-        $filtered_lines = [];
-        foreach ($all_key_lines as $line) {
-            if (preg_match('/key=(\S+)/', $line, $match)) {
-                // Decodificar la clave URL-encoded antes de comparar
-                $keyName = urldecode($match[1]);
-                if (Helpers::matchSearchPattern($keyName, $search)) {
-                    $filtered_lines[] = $line;
-                }
-            }
-        }
-
-        return $filtered_lines;
-    }
-
-    /**
-     * @param array<int, string> $raw_lines
-     *
-     * @return array<int, array<string, mixed>>
-     */
-    public function keysTableView(array $raw_lines): array {
-        $formatted_keys = [];
-
-        foreach ($raw_lines as $line) {
-            $key_data = $this->memcached->parseLine($line);
-
-            $formatted_keys[] = [
-                'key'  => $key_data['key'],
-                'info' => [
-                    'link_title'           => urldecode($key_data['key']),
-                    'bytes_size'           => $key_data['size'] ?? 0,
-                    'timediff_last_access' => $key_data['la'] ?? 0,
-                    'countdown_ttl'     => $key_data['exp'] ?? null,
-                ],
-            ];
-        }
-
-        return Helpers::sortKeys($this->template, $formatted_keys);
-    }
-
-    /**
-     * @param array<int, string> $raw_lines
-     *
      * @return array<string, mixed>
-     * @throws MemcachedException
-     */
-    public function keysTreeView(array $raw_lines): array {
-        $separator = $this->servers[$this->current_server]['separator'] ?? ':';
-        $displaySeparator = $separator; // Separador decodificado para paths
-
-        if (version_compare($this->memcached->version(), '1.5.19', '>=')) {
-            $separator = urlencode($separator);
-        }
-
-        $this->template->addGlobal('separator', $displaySeparator);
-
-        $time = time();
-
-        $tree = [];
-
-        foreach ($raw_lines as $line) {
-            $key_data = $this->memcached->parseLine($line);
-
-            if (!isset($key_data['key'])) {
-                continue;
-            }
-
-            $parts = explode($separator, $key_data['key']);
-
-            /** @var array<int|string, mixed> $current */
-            $current = &$tree;
-            $path = '';
-
-            foreach ($parts as $i => $part) {
-                $decodedPart = urldecode($part);
-                // Usar separador decodificado para construir el path
-                $path = $path !== '' && $path !== '0' ? $path.$displaySeparator.$decodedPart : $decodedPart;
-
-                if ($i === count($parts) - 1) { // check last part
-                    $current[] = [
-                        'type' => 'key',
-                        'name' => $decodedPart,
-                        'key'  => $key_data['key'],
-                        'info' => [
-                            'bytes_size'           => $key_data['size'] ?? 0,
-                            'timediff_last_access' => $key_data['la'] ?? 0,
-                            'countdown_ttl'        => $key_data['exp'] ?? null,
-                        ],
-                    ];
-                } else {
-                    $current[$part] ??= [
-                        'type' => 'folder',
-                        'name' => $decodedPart,
-                        'path' => $path,
-                        'children' => [],
-                        'expanded' => false,
-                    ];
-
-                    $current = &$current[$part]['children'];
-                }
-            }
-        }
-
-        Helpers::calculateStats($tree);
-
-        return $tree;
-    }
-
-    /**
-     * Generates namespace statistics using generators to optimize memory.
-     *
-     * @return \Generator<int, array{key: string, size: int}>
      *
      * @throws MemcachedException
      */
-    private function keysGenerator(): \Generator {
-        $all_key_lines = $this->memcached->getKeys();
-
-        foreach ($all_key_lines as $line) {
-            $key_data = $this->memcached->parseLine($line);
-
-            if (!isset($key_data['key'])) {
-                continue;
+    private function keysTab(): array {
+        if (isset($_POST['submit_import_key'])) {
+            if (Csrf::validateToken(Http::post('csrf_token', ''))) {
+                Helpers::import(
+                    fn (string $key): bool => $this->memcached->exists($key),
+                    fn (string $key, string $value, int $ttl): bool => $this->memcached->set(urldecode($key), base64_decode($value), $ttl)
+                );
+            } else {
+                echo Helpers::alert('Invalid CSRF token.', 'error');
             }
+        }
 
-            yield [
-                'key'  => $key_data['key'],
-                'size' => $key_data['size'] ?? 0,
+        Helpers::importResultAlert();
+
+        if (Http::get('view', Config::get('listview', 'table')) === 'namespaces' && !isset($_GET['export_btn'])) {
+            return $this->keysNamespaceView() + [
+                'keys'      => [],
+                'all_keys'  => $this->memcached->getServerStats()['curr_items'],
+                'paginator' => '',
             ];
         }
-    }
 
-    /**
-     * Gets namespace statistics for a given prefix.
-     *
-     * @param string $prefix The namespace prefix (empty for root level)
-     *
-     * @return array<int, array{name: string, path: string, count: int, size: int, percentage: float, has_children: bool}>
-     *
-     * @throws MemcachedException
-     *
-     * @param int $page     Página actual (1-based)
-     * @param int $per_page Número de namespaces por página
-     *
-     * @return array{namespaces: array<int, array{name: string, path: string, count: int, size: int, percentage: float, has_children: bool, direct_keys: int, direct_keys_names?: array<int, string>}>, direct_keys_count: int, direct_keys_size: int, direct_keys_percentage: float, direct_keys_names: array<int, string>, pagination: array{page: int, per_page: int, total: int, total_pages: int}}
-     */
-    public function keysNamespaceView(string $prefix = '', int $page = 1, int $per_page = 100): array {
-        $separator = $this->servers[$this->current_server]['separator'] ?? ':';
-        $displaySeparator = $separator; // Separador para mostrar y construir paths
+        $raw_key_lines = $this->getAllKeys();
 
-        // Asegurar que el prefix está decodificado
-        $prefix = urldecode($prefix);
-
-        if (version_compare($this->memcached->version(), '1.5.19', '>=')) {
-            $separator = urlencode($separator);
-        }
-
-        $this->template->addGlobal('separator', $displaySeparator);
-        $nsTitleKeys = Config::get('nstitlekeys', 25);
-
-        // Convertir el prefix a formato encoded para comparar con las claves raw
-        $encodedPrefix = $prefix !== '' ? str_replace($displaySeparator, $separator, $prefix) : '';
-
-        $namespaces = [];
-        $total_size = 0;
-        $direct_keys_count = 0;
-        $direct_keys_size = 0;
-        /** @var array<int, string> */
-        $direct_keys_names = [];
-
-        foreach ($this->keysGenerator() as $keyData) {
-            $key = $keyData['key'];
-            $size = $keyData['size'];
-
-            // Filter by prefix if it exists (usando prefix codificado para comparar)
-            if ($encodedPrefix !== '') {
-                if (!str_starts_with($key, $encodedPrefix.$separator)) {
-                    continue;
+        if (isset($_GET['export_btn'])) {
+            $keys_to_export = [];
+            foreach ($raw_key_lines as $line) {
+                $key_data = $this->memcached->parseLine($line);
+                if (isset($key_data['key'])) {
+                    $keys_to_export[] = [
+                        'key' => $key_data['key'],
+                        'ttl' => ($key_data['exp'] ?? -1) === -1 ? -1 : ($key_data['exp'] - time()),
+                    ];
                 }
             }
 
-            $total_size += $size;
+            Helpers::export($keys_to_export, 'memcached_backup', function (string $key): ?string {
+                $value = $this->memcached->get(urldecode($key));
 
-            // Extract the current level namespace
-            $keyWithoutPrefix = $encodedPrefix !== '' ? substr($key, strlen($encodedPrefix) + strlen($separator)) : $key;
-            $parts = explode($separator, $keyWithoutPrefix);
-
-            // Only one part means it's a direct key without sub-namespace
-            if (count($parts) === 1) {
-                $direct_keys_count++;
-                $direct_keys_size += $size;
-                // Almacenar el nombre de la clave si hay pocas
-                if ($direct_keys_count <= $nsTitleKeys) {
-                    $direct_keys_names[] = urldecode($parts[0]);
-                }
-                continue;
-            }
-
-            if (count($parts) > 1) {
-                $ns_name = urldecode($parts[0]);
-                $ns_path = $prefix !== '' ? $prefix.$displaySeparator.$ns_name : $ns_name;
-
-                $namespaces[$ns_path] ??= [
-                    'name'              => $ns_name,
-                    'path'              => $ns_path,
-                    'count'             => 0,
-                    'size'              => 0,
-                    'has_children'      => false,
-                    'direct_keys'       => 0,
-                    'direct_keys_names' => [],
-                ];
-
-                $namespaces[$ns_path]['count']++;
-                $namespaces[$ns_path]['size'] += $size;
-
-                // Determine if it has children (more than two parts after the current namespace)
-                if (count($parts) > 2) {
-                    $namespaces[$ns_path]['has_children'] = true;
-                } else {
-                    // It's a direct key of the namespace (e.g.: user:123, not user:123:name)
-                    $namespaces[$ns_path]['direct_keys']++;
-                    // Almacenar el nombre de la clave si hay pocas
-                    if ($namespaces[$ns_path]['direct_keys'] <= $nsTitleKeys) {
-                        $namespaces[$ns_path]['direct_keys_names'][] = urldecode($parts[1]);
-                    }
-                }
-            }
+                return $value !== false ? base64_encode($value) : null;
+            });
         }
 
-        // Calculate percentages and clean keys names if limit exceeded
-        foreach ($namespaces as &$ns) {
-            $ns['percentage'] = $total_size > 0 ? round(($ns['size'] / $total_size) * 100, 2) : 0;
-            // Eliminar nombres de claves si hay más del límite
-            if ($ns['direct_keys'] > $nsTitleKeys) {
-                $ns['direct_keys_names'] = [];
-            }
-        }
+        $field = static function (string $line, string $name): string {
+            return preg_match('/(?:^| )'.$name.'=(\S+)/', $line, $found) === 1 ? $found[1] : '';
+        };
 
-        // Sort by size in descending order
-        uasort($namespaces, static fn (array $a, array $b): int => $b['size'] <=> $a['size']);
-
-        // Calculate direct keys percentage
-        $direct_keys_percentage = $total_size > 0 ? round(($direct_keys_size / $total_size) * 100, 2) : 0;
-
-        // Limpiar nombres de claves directas si hay más del límite
-        if ($direct_keys_count > $nsTitleKeys) {
-            $direct_keys_names = [];
-        }
-
-        // Aplicar paginación
-        $total_namespaces = count($namespaces);
-        $total_pages = (int) ceil($total_namespaces / $per_page);
-        $page = max(1, min($page, max(1, $total_pages)));
-        $offset = ($page - 1) * $per_page;
-        $paginated_namespaces = array_slice(array_values($namespaces), $offset, $per_page);
-
-        return [
-            'namespaces'             => $paginated_namespaces,
-            'direct_keys_count'      => $direct_keys_count,
-            'direct_keys_size'       => $direct_keys_size,
-            'direct_keys_percentage' => $direct_keys_percentage,
-            'direct_keys_names'      => $direct_keys_names,
-            'pagination'             => [
-                'page'        => $page,
-                'per_page'    => $per_page,
-                'total'       => $total_namespaces,
-                'total_pages' => $total_pages,
-            ],
-        ];
-    }
-
-    /**
-     * @param array<int|string, mixed> $info
-     *
-     * @return array<int|string, mixed>
-     */
-    private function commandsStatsData(array $info): array {
-        $rate = (static fn (int $hits, int $total): float => $hits !== 0 && $total !== 0 ? round(($hits / $total) * 100, 2) : 0);
-
-        $get_hit_rate = $rate($info['get_hits'], $info['cmd_get']);
-        $delete_hit_rate = $rate($info['delete_hits'], $info['delete_hits'] + $info['delete_misses']);
-        $incr_hit_rate = $rate($info['incr_hits'], $info['incr_hits'] + $info['incr_misses']);
-        $decr_hit_rate = $rate($info['decr_hits'], $info['decr_hits'] + $info['decr_misses']);
-        $cas_hit_rate = $rate($info['cas_hits'], $info['cas_hits'] + $info['cas_misses']);
-        $touch_hit_rate = $rate($info['touch_hits'], $info['cmd_touch']);
-
-        return [
-            [
-                'title' => 'get',
-                'data'  => [
-                    'Hits'   => Format::number($info['get_hits']),
-                    'Misses' => Format::number($info['get_misses']),
-                    ['Hit Rate', $get_hit_rate.'%', $get_hit_rate, 'higher'],
-                ],
-            ],
-            [
-                'title' => 'delete',
-                'data'  => [
-                    'Hits'   => Format::number($info['delete_hits']),
-                    'Misses' => Format::number($info['delete_misses']),
-                    ['Hit Rate', $delete_hit_rate.'%', $delete_hit_rate, 'higher'],
-                ],
-            ],
-            [
-                'title' => 'incr',
-                'data'  => [
-                    'Hits'   => Format::number($info['incr_hits']),
-                    'Misses' => Format::number($info['incr_misses']),
-                    ['Hit Rate', $incr_hit_rate.'%', $incr_hit_rate, 'higher'],
-                ],
-            ],
-            [
-                'title' => 'decr',
-                'data'  => [
-                    'Hits'   => Format::number($info['decr_hits']),
-                    'Misses' => Format::number($info['decr_misses']),
-                    ['Hit Rate', $decr_hit_rate.'%', $decr_hit_rate, 'higher'],
-                ],
-            ],
-            [
-                'title' => 'touch',
-                'data'  => [
-                    'Hits'   => Format::number($info['touch_hits']),
-                    'Misses' => Format::number($info['touch_misses']),
-                    ['Hit Rate', $touch_hit_rate.'%', $touch_hit_rate, 'higher'],
-                ],
-            ],
-            [
-                'title' => 'cas',
-                'data'  => [
-                    'Hits'      => Format::number($info['cas_hits']),
-                    'Misses'    => Format::number($info['cas_misses']),
-                    ['Hit Rate', $cas_hit_rate.'%', $cas_hit_rate, 'higher'],
-                    'Bad Value' => $info['cas_badval'],
-                ],
-            ],
-            [
-                'title' => 'set',
-                'data'  => [
-                    'Total' => Format::number($info['cmd_set']),
-                ],
-            ],
-            [
-                'title' => 'flush',
-                'data'  => [
-                    'Total' => Format::number($info['cmd_flush']),
-                ],
-            ],
-        ];
-    }
-
-    private function commandsStats(): string {
-        try {
-            $info = $this->memcached->getServerStats();
-            $commands = $this->commandsStatsData($info);
-        } catch (MemcachedException $e) {
-            $commands = ['error' => $e->getMessage()];
-        }
-
-        return $this->template->render('dashboards/memcached/memcached', ['commands' => $commands]);
-    }
-
-    /**
-     * @throws MemcachedException
-     */
-    private function slabs(): string {
-        $slabs_stats = $this->memcached->getSlabsStats();
-
-        $slabs = array_map(static function (array $slab): array {
-            $fields = [
-                'chunk_size'      => ['Chunk Size', 'bytes'],
-                'chunks_per_page' => ['Chunks per Page', 'number'],
-                'total_pages'     => ['Total Pages', 'number'],
-                'total_chunks'    => ['Total Chunks', 'number'],
-                'used_chunks'     => ['Used Chunks', 'number'],
-                'free_chunks'     => ['Free Chunks', 'number'],
-                'free_chunks_end' => ['Free Chunks (End)', 'number'],
-                'get_hits'        => ['GET Hits', 'number'],
-                'cmd_set'         => ['SET Commands', 'number'],
-                'delete_hits'     => ['DELETE Hits', 'number'],
-                'incr_hits'       => ['INCREMENT Hits', 'number'],
-                'decr_hits'       => ['DECREMENT Hits', 'number'],
-                'cas_hits'        => ['CAS Hits', 'number'],
-                'cas_badval'      => ['CAS Bad Value', 'number'],
-                'touch_hits'      => ['TOUCH Hits', 'number'],
-            ];
-
-            return Helpers::formatFields($fields, $slab);
-        }, $slabs_stats['slabs']);
-
-        return $this->template->render('dashboards/memcached/memcached', [
-            'slabs' => $slabs,
-            'meta'  => $slabs_stats['meta'],
+        $raw_key_lines = Helpers::sortBeforePaginate($raw_key_lines, [
+            'link_title'           => static fn (string $line): string => urldecode($field($line, 'key')),
+            'bytes_size'           => static fn (string $line): int => (int) $field($line, 'size'),
+            'timediff_last_access' => static fn (string $line): int => (int) $field($line, 'la'),
+            'ttl'                  => static fn (string $line): int => (int) $field($line, 'exp'),
         ]);
+
+        $paginator = new Paginator($raw_key_lines);
+        $paginated_raw_lines = $paginator->getPaginated();
+
+        if (Http::get('view', Config::get('listview', 'table')) === 'tree') {
+            $keys_to_display = $this->keysTreeView($paginated_raw_lines);
+        } else {
+            $keys_to_display = $this->keysTableView($paginated_raw_lines);
+        }
+
+        return [
+            'keys'      => $keys_to_display,
+            'all_keys'  => $this->memcached->getServerStats()['curr_items'],
+            'paginator' => $paginator->render(),
+            'view_key'  => Http::queryString([], ['view' => 'key', 'key' => '__key__']),
+        ];
     }
 
     /**
+     * @return array<string, mixed>
+     *
      * @throws MemcachedException
      */
-    private function items(): string {
+    private function itemsTab(): array {
         $stats = $this->memcached->getItemsStats();
 
         $items = array_map(static function (array $item): array {
@@ -655,106 +193,53 @@ trait MemcachedTrait {
             return Helpers::formatFields($fields, $item);
         }, $stats);
 
-        return $this->template->render('dashboards/memcached/memcached', ['items' => $items]);
+        return ['items' => $items];
     }
 
-    private function metrics(): string {
+    /**
+     * @return array<string, mixed>
+     */
+    private function metricsTab(): array {
         if (!in_array('sqlite', PDO::getAvailableDrivers(), true)) {
-            return $this->template->render('components/tabs', [
-                    'links' => [
-                        'keys' => 'Keys', 'commands_stats' => 'Commands Stats', 'slabs' => 'Slabs', 'items' => 'Items', 'metrics' => 'Metrics',
-                    ],
-                ]).
-                'Metrics are disabled because the PDO SQLite driver is not available. Install the sqlite3 extension for PHP.';
+            return ['tab_error' => 'Metrics are disabled because the PDO SQLite driver is not available. Install the sqlite3 extension for PHP.'];
         }
 
-        return $this->template->render('dashboards/memcached/memcached');
+        try {
+            $health = $this->getHealthChecks($this->memcached->getServerStats());
+        } catch (MemcachedException) {
+            $health = [];
+        }
+
+        return ['health' => $health];
     }
 
     /**
      * @throws MemcachedException
      */
     private function mainDashboard(): string {
-        if (isset($_POST['submit_import_key'])) {
-            Helpers::import(
-                fn (string $key): bool => $this->memcached->exists($key),
-                fn (string $key, string $value, int $ttl): bool => $this->memcached->set(urldecode($key), base64_decode($value), $ttl)
-            );
+        $tab = Http::get('tab', '');
+        $tab = array_key_exists($tab, $this->tabs) ? $tab : array_key_first($this->tabs);
+
+        $tab_data = match ($tab) {
+            'keys' => $this->keysTab(),
+            'analysis' => $this->analysisTab(),
+            'commands_stats' => $this->commandsStatsTab(),
+            'slabs' => $this->slabsTab(),
+            'items' => $this->itemsTab(),
+            'metrics' => $this->metricsTab(),
+            'connections' => $this->connectionsTab(),
+            'watcher' => $this->watcherTab(),
+            'moreinfo' => ['data' => $this->moreinfoTab(), 'tpl' => 'partials/info_table'],
+            default => [],
+        };
+
+        $tpl = $tab_data['tpl'] ?? 'dashboards/memcached/'.$tab;
+        $data = $tab_data['data'] ?? $tab_data;
+
+        if (isset($data['tab_error'])) {
+            return htmlspecialchars((string) $data['tab_error']);
         }
 
-        if (Http::get('tab') === 'commands_stats') {
-            return $this->commandsStats();
-        }
-
-        if (Http::get('tab') === 'slabs') {
-            return $this->slabs();
-        }
-
-        if (Http::get('tab') === 'items') {
-            return $this->items();
-        }
-
-        if (Http::get('tab') === 'metrics') {
-            return $this->metrics();
-        }
-
-        $view = Http::get('view', Config::get('listview', 'table'));
-
-        // Namespace view - usa paginación propia
-        if ($view === 'namespaces') {
-            $page = (int) Http::get('nspage', 1);
-            $per_page = (int) Http::get('nspp', Config::get('nsperpage', 100));
-            $result = $this->keysNamespaceView('', $page, $per_page);
-
-            return $this->template->render('dashboards/memcached/memcached', [
-                'namespaces'             => $result['namespaces'],
-                'direct_keys_count'      => $result['direct_keys_count'],
-                'direct_keys_size'       => $result['direct_keys_size'],
-                'direct_keys_percentage' => $result['direct_keys_percentage'],
-                'direct_keys_names'      => $result['direct_keys_names'],
-                'ns_pagination'          => $result['pagination'],
-                'keys'                   => [], // No keys in this view
-                'all_keys'               => $this->memcached->getServerStats()['curr_items'],
-                'paginator'              => '',
-                'view_key'               => Http::queryString([], ['view' => 'key', 'key' => '__key__']),
-            ]);
-        }
-
-        $raw_key_lines = $this->getAllKeys();
-
-        if (isset($_GET['export_btn'])) {
-            $keys_to_export = [];
-            foreach ($raw_key_lines as $line) {
-                $key_data = $this->memcached->parseLine($line);
-                if (isset($key_data['key'])) {
-                    $keys_to_export[] = [
-                        'key' => $key_data['key'],
-                        'ttl' => ($key_data['exp'] ?? -1) === -1 ? -1 : ($key_data['exp'] - time()),
-                    ];
-                }
-            }
-
-            Helpers::export($keys_to_export, 'memcached_backup', function (string $key): ?string {
-                $value = $this->memcached->getKey(urldecode($key));
-
-                return $value !== false ? base64_encode($value) : null;
-            });
-        }
-
-        $paginator = new Paginator($this->template, $raw_key_lines);
-        $paginated_raw_lines = $paginator->getPaginated();
-
-        if ($view === 'tree') {
-            $keys_to_display = $this->keysTreeView($paginated_raw_lines);
-        } else {
-            $keys_to_display = $this->keysTableView($paginated_raw_lines);
-        }
-
-        return $this->template->render('dashboards/memcached/memcached', [
-            'keys'      => $keys_to_display,
-            'all_keys'  => $this->memcached->getServerStats()['curr_items'],
-            'paginator' => $paginator->render(),
-            'view_key'  => Http::queryString([], ['view' => 'key', 'key' => '__key__']),
-        ]);
+        return $this->template->render($tpl, $data);
     }
 }

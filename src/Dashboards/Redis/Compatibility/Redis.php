@@ -8,6 +8,8 @@ declare(strict_types=1);
 
 namespace RobiNN\Pca\Dashboards\Redis\Compatibility;
 
+use Exception;
+use JsonException;
 use RedisException;
 use RobiNN\Pca\Dashboards\DashboardException;
 
@@ -25,8 +27,13 @@ class Redis extends \Redis implements RedisCompatibilityInterface {
         self::REDIS_ZSET      => 'zset',
         self::REDIS_HASH      => 'hash',
         self::REDIS_STREAM    => 'stream',
-        'ReJSON-RL'           => 'rejson',
+        'ReJSON-RL'           => 'json',
     ];
+
+    /**
+     * @var array<string, mixed>
+     */
+    private array $server;
 
     /**
      * @param array<string, mixed> $server
@@ -37,13 +44,30 @@ class Redis extends \Redis implements RedisCompatibilityInterface {
         parent::__construct();
 
         $server['port'] ??= 6379;
+        $server['scheme'] ??= 'tcp';
+        $this->server = $server;
+
+        $this->connectToServer();
+
+        if ($this->supportsVectorSets()) {
+            $this->data_types[self::REDIS_VECTORSET] = 'vectorset';
+        }
+    }
+
+    private function supportsVectorSets(): bool {
+        return defined('Redis::REDIS_VECTORSET');
+    }
+
+    /**
+     * @throws DashboardException
+     */
+    private function connectToServer(): void {
+        $server = $this->server;
 
         try {
             if (isset($server['path'])) {
                 $this->connect($server['path']);
             } else {
-                $server['scheme'] ??= 'tcp';
-
                 $this->connect($server['scheme'].'://'.$server['host'], (int) $server['port'], 3, null, 0, 0, [
                     'stream' => $server['ssl'] ?? [],
                 ]);
@@ -58,7 +82,7 @@ class Redis extends \Redis implements RedisCompatibilityInterface {
             $this->select($server['database'] ?? 0);
         } catch (RedisException $e) {
             $connection = $server['path'] ?? $server['host'].':'.$server['port'];
-            throw new DashboardException($e->getMessage().' ['.$connection.']');
+            throw new DashboardException($e->getMessage().' ['.$connection.']', $e->getCode(), $e);
         }
     }
 
@@ -86,31 +110,19 @@ class Redis extends \Redis implements RedisCompatibilityInterface {
      * @throws RedisException
      */
     public function getInfo(?string $option = null): array {
-        static $info = null;
-
-        if ($info === null) {
-            $section_info = [];
-
-            foreach ($this->getInfoSections() as $section) {
-                try {
-                    $section_data = $this->info($section);
-
-                    if ($section_data) {
-                        $section_info[strtolower($section)] = $section_data;
-                    }
-                } catch (RedisException) {
-                    continue;
-                }
+        if ($this->info_cache === null) {
+            try {
+                $this->info_cache = $this->parseInfoOutput((string) $this->rawcommand('INFO', 'all'));
+            } catch (RedisException) {
+                $this->info_cache = [];
             }
-
-            $info = $section_info;
         }
 
         if ($option !== null) {
-            return $info[strtolower($option)] ?? [];
+            return $this->info_cache[strtolower($option)] ?? [];
         }
 
-        return $info;
+        return $this->info_cache;
     }
 
     /**
@@ -118,7 +130,8 @@ class Redis extends \Redis implements RedisCompatibilityInterface {
      *
      * @throws RedisException
      */
-    public function scanKeys(string $pattern, int $count): array {
+    public function scanKeys(string $pattern, int $count, ?int $limit = null): array {
+        $limit ??= $count;
         $keys = [];
 
         $iterator = null;
@@ -126,35 +139,14 @@ class Redis extends \Redis implements RedisCompatibilityInterface {
         while (false !== ($scan = $this->scan($iterator, $pattern, $count))) {
             foreach ($scan as $key) {
                 $keys[] = $key;
-            }
 
-            if (count($keys) === $count) {
-                break;
+                if (count($keys) >= $limit) {
+                    return $keys;
+                }
             }
         }
 
         return $keys;
-    }
-
-    /**
-     * @return array{cursor: int|string, keys: array<int, string>}
-     *
-     * @throws RedisException
-     */
-    public function scanKeysWithCursor(string $pattern, int $count, int|string|null $cursor): array {
-        $iterator = $cursor ?? null;
-        $keys = [];
-
-        $scan = $this->scan($iterator, $pattern, $count);
-
-        if ($scan !== false) {
-            $keys = $scan;
-        }
-
-        return [
-            'cursor' => $iterator ?? 0,
-            'keys'   => $keys,
-        ];
     }
 
     /**
@@ -171,6 +163,111 @@ class Redis extends \Redis implements RedisCompatibilityInterface {
      */
     public function streamAdd(string $key, string $id, array $messages): string {
         return $this->xadd($key, $id, $messages);
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     *
+     * @throws RedisException
+     */
+    public function streamGroups(string $key): array {
+        return $this->xinfo('GROUPS', $key) ?: [];
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     *
+     * @throws RedisException
+     */
+    public function streamConsumers(string $key, string $group): array {
+        return $this->xinfo('CONSUMERS', $key, $group) ?: [];
+    }
+
+    /**
+     * @return array<int, mixed>
+     *
+     * @throws RedisException
+     */
+    public function streamPending(string $key, string $group): array {
+        return $this->xpending($key, $group) ?: [];
+    }
+
+    /**
+     * @return array<string, mixed>
+     *
+     * @throws RedisException
+     */
+    public function streamReadGroup(string $key, string $group, string $consumer, int $count): array {
+        return $this->xreadgroup($group, $consumer, [$key => '>'], $count) ?: [];
+    }
+
+    /**
+     * @throws RedisException
+     */
+    public function streamCreateGroup(string $key, string $group, string $id = '0'): bool {
+        return (bool) $this->xgroup('CREATE', $key, $group, $id);
+    }
+
+    /**
+     * @return array<string, mixed>
+     *
+     * @throws RedisException
+     */
+    public function vectorInfo(string $key): array {
+        $info = $this->supportsVectorSets() ? $this->vinfo($key) : false;
+
+        return is_array($info) ? $info : [];
+    }
+
+    /**
+     * @return array<int, string>
+     *
+     * @throws RedisException
+     */
+    public function vectorMembers(string $key, int $count): array {
+        $members = $this->supportsVectorSets() ? $this->vrandmember($key, $count) : false;
+
+        return is_array($members) ? array_map(strval(...), $members) : [];
+    }
+
+    /**
+     * @return array<int, float>
+     *
+     * @throws RedisException
+     */
+    public function vectorEmbedding(string $key, string $element): array {
+        return $this->supportsVectorSets() ? $this->parseVectorEmbedding($this->vemb($key, $element)) : [];
+    }
+
+    /**
+     * @throws RedisException
+     *
+     * @throws JsonException
+     */
+    public function vectorAttributes(string $key, string $element): string {
+        $attributes = $this->supportsVectorSets() ? $this->vgetattr($key, $element) : false;
+
+        if (is_array($attributes)) {
+            $attributes = json_encode($attributes, JSON_THROW_ON_ERROR);
+        }
+
+        return is_string($attributes) ? $attributes : '';
+    }
+
+    /**
+     * @param array<int, float|string> $vector
+     *
+     * @throws RedisException
+     */
+    public function vectorAdd(string $key, string $element, array $vector, string $attributes = ''): bool {
+        return $this->supportsVectorSets() && $this->vadd($key, $vector, $element, $attributes !== '' ? ['SETATTR' => $attributes] : null);
+    }
+
+    /**
+     * @throws RedisException
+     */
+    public function vectorRem(string $key, string $element): bool {
+        return $this->supportsVectorSets() && $this->vrem($key, $element);
     }
 
     /**
@@ -215,7 +312,7 @@ class Redis extends \Redis implements RedisCompatibilityInterface {
 
             $data[$key] = [
                 'ttl'   => $result[0],
-                'type'  => $result[1],
+                'type'  => $this->data_types[(string) $result[1]] ?? $result[1],
                 'size'  => $result[2] ?? 0,
                 'count' => isset($result[3]) && is_numeric($result[3]) ? (int) $result[3] : null,
             ];
@@ -228,6 +325,27 @@ class Redis extends \Redis implements RedisCompatibilityInterface {
         $size = $this->rawcommand('MEMORY', 'USAGE', $key);
 
         return is_int($size) ? $size : 0;
+    }
+
+    public function keyEncoding(string $key): string {
+        $encoding = $this->object('encoding', $key);
+
+        return is_string($encoding) ? $encoding : '';
+    }
+
+    /**
+     * @param array<int, string> $fields
+     *
+     * @return array<string, int>
+     */
+    public function hashFieldTtl(string $key, array $fields): array {
+        return $this->parseHashFieldTtl($this->httl($key, $fields), $fields);
+    }
+
+    public function hashFieldExpire(string $key, string $field, int $ttl): bool {
+        $reply = $ttl > 0 ? $this->hexpire($key, $ttl, [$field]) : $this->hpersist($key, [$field]);
+
+        return $this->hashFieldExpireApplied($reply);
     }
 
     public function flushDatabase(): bool {
@@ -254,15 +372,161 @@ class Redis extends \Redis implements RedisCompatibilityInterface {
     }
 
     /**
-     * @return array<int, string>
+     * @return array<int, array<string, mixed>>
+     *
+     * @throws RedisException
      */
-    public function getCommands(): array {
-        $commands = $this->rawcommand('COMMAND');
+    public function latencyLatest(): array {
+        return $this->parseLatencyLatest($this->rawcommand('LATENCY', 'LATEST'));
+    }
 
-        return array_column($commands, 0);
+    /**
+     * @return array<int, array<string, mixed>>
+     *
+     * @throws RedisException
+     */
+    public function latencyHistory(string $event): array {
+        return $this->parseLatencyHistory($this->rawcommand('LATENCY', 'HISTORY', $event));
+    }
+
+    /**
+     * @throws RedisException
+     */
+    public function latencyReset(): bool {
+        return is_numeric($this->rawcommand('LATENCY', 'RESET'));
+    }
+
+    /**
+     * @throws RedisException
+     */
+    public function latencyDoctor(): string {
+        return (string) $this->rawcommand('LATENCY', 'DOCTOR');
+    }
+
+    /**
+     * @throws RedisException
+     */
+    public function memoryDoctor(): string {
+        return (string) $this->rawcommand('MEMORY', 'DOCTOR');
+    }
+
+    public function commandExists(string $command): bool {
+        $info = $this->rawcommand('COMMAND', 'INFO', $command);
+
+        return is_array($info[0] ?? null);
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     *
+     * @throws RedisException
+     */
+    public function getClients(): array {
+        $self_id = $this->rawcommand('CLIENT', 'ID');
+
+        return $this->parseClientList(
+            (string) $this->rawcommand('CLIENT', 'LIST'),
+            is_numeric($self_id) ? (string) $self_id : null
+        );
+    }
+
+    /**
+     * @throws RedisException
+     */
+    public function killClient(string $id): bool {
+        return (int) $this->rawcommand('CLIENT', 'KILL', 'ID', $id) > 0;
     }
 
     public function restoreKeys(string $key, int $ttl, string $value): bool {
         return $this->restore($key, $ttl, $value);
+    }
+
+    /**
+     * @throws RedisException
+     */
+    public function jsonGet(string $key): string {
+        return (string) $this->rawcommand('JSON.GET', $key);
+    }
+
+    /**
+     * @throws RedisException
+     */
+    public function jsonSet(string $key, mixed $value): bool {
+        $raw = $this->rawcommand('JSON.SET', $key, '$', $value);
+
+        return $raw === true || $raw === 'OK';
+    }
+
+    /**
+     * @return array{channels: array<string, int>, patterns: int}
+     *
+     * @throws RedisException
+     */
+    public function pubSubStats(string $pattern = '*'): array {
+        $channels = $this->rawcommand('PUBSUB', 'CHANNELS', $pattern);
+        $numsub = is_array($channels) && $channels !== [] ? $this->rawcommand('PUBSUB', 'NUMSUB', ...$channels) : [];
+        $numpat = $this->rawcommand('PUBSUB', 'NUMPAT');
+
+        return [
+            'channels' => $this->parseNumSubReply(is_array($numsub) ? $numsub : []),
+            'patterns' => is_numeric($numpat) ? (int) $numpat : 0,
+        ];
+    }
+
+    /**
+     * @throws RedisException
+     */
+    public function publishMessage(string $channel, string $message): int {
+        $receivers = $this->publish($channel, $message);
+
+        return is_int($receivers) ? $receivers : 0;
+    }
+
+    /**
+     * @return array<int, array{channel: string, message: string, time: int}>
+     */
+    public function captureMessages(string $pattern, int $seconds, int $limit): array {
+        $messages = [];
+        $start = microtime(true);
+
+        try {
+            $this->setOption(self::OPT_READ_TIMEOUT, $seconds);
+            $this->psubscribe([$pattern], static function ($redis, string $p, string $channel, string $message) use (&$messages, $start, $seconds, $limit): void {
+                $messages[] = ['channel' => $channel, 'message' => $message, 'time' => time()];
+
+                if (count($messages) >= $limit || (microtime(true) - $start) >= $seconds) {
+                    $redis->punsubscribe([$p]);
+                }
+            });
+        } catch (RedisException) {
+        } finally {
+            try {
+                $this->close();
+                $this->setOption(self::OPT_READ_TIMEOUT, 0);
+                $this->connectToServer();
+            } catch (Exception) {
+            }
+        }
+
+        return array_slice($messages, 0, $limit);
+    }
+
+    /**
+     * @param array<int, string> $args
+     *
+     * @throws RedisException
+     */
+    public function consoleCommand(array $args): mixed {
+        $this->setOption(self::OPT_REPLY_LITERAL, true);
+        $this->clearLastError();
+
+        $command = array_shift($args);
+        $reply = $this->rawcommand($command, ...$args);
+
+        if ($reply === false && ($error = $this->getLastError()) !== null) {
+            throw new RedisException($error);
+        }
+
+        return $reply;
     }
 }
