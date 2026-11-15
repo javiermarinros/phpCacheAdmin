@@ -149,8 +149,8 @@ trait MemcachedKeysList {
     public function keysNamespaceStep(string $prefix): array {
         $separator = $this->servers[$this->current_server]['separator'] ?? ':';
 
-        // At the top level the search box filters the keys, inside a namespace the prefix does.
-        $keys = $this->namespaceKeys($prefix === '' ? $this->getAllKeys() : $this->memcached->getKeys(), $prefix);
+        // The search box filters every level, so the levels add up to the top level.
+        $keys = $this->namespaceKeys($this->getAllKeys(), $prefix);
 
         return ['cursor' => '0', 'scanned' => count($keys)] + Helpers::namespaceBatch($keys, $prefix, $separator);
     }

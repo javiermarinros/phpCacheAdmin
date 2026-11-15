@@ -186,9 +186,16 @@ trait RedisKeysList {
     public function keysNamespaceStep(string $prefix, string $cursor): array {
         $separator = $this->servers[$this->current_server]['separator'] ?? ':';
 
-        // At the top level the search box filters the keys, inside a namespace the prefix does.
-        $pattern = $prefix === '' ? $this->searchPattern((string) Http::get('s', '', true)) : $this->namespacePattern($prefix);
-        [$next, $keys] = $this->keysStep($pattern, $cursor);
+        $search = $this->searchPattern((string) Http::get('s', '', true));
+
+        // At the top level the search pattern selects the keys, inside a namespace the prefix does and the search
+        // filters them, so the levels add up to the top level.
+        [$next, $keys] = $this->keysStep($prefix === '' ? $search : $this->namespacePattern($prefix), $cursor);
+        $scanned = count($keys);
+
+        if ($prefix !== '' && $search !== '*') {
+            $keys = array_values(array_filter($keys, static fn (string $key): bool => fnmatch($search, $key)));
+        }
 
         $sizes = [];
 
@@ -196,7 +203,7 @@ trait RedisKeysList {
             $sizes[$key] = (int) ($info['size'] ?? 0);
         }
 
-        return ['cursor' => $next, 'scanned' => count($keys)] + Helpers::namespaceBatch($sizes, $prefix, $separator);
+        return ['cursor' => $next, 'scanned' => $scanned] + Helpers::namespaceBatch($sizes, $prefix, $separator);
     }
 
     /**
