@@ -138,7 +138,9 @@ class Template {
 
         $twig->addFunction(new TwigFunction('asset', static function (string $file): string {
             $full_path = __DIR__.'/../'.$file;
-            $version = is_file($full_path) ? filemtime($full_path) : Admin::VERSION;
+            // A hash of the content, not filemtime(): some hosts (App Engine, images built with fixed dates) give every
+            // file the same mtime, so the browser would keep an old script after an update.
+            $version = is_file($full_path) ? substr(hash_file('xxh3', $full_path), 0, 8) : Admin::VERSION;
 
             return Config::get('pcapath', '').$file.'?v='.$version;
         }));
