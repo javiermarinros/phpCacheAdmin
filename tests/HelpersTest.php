@@ -367,9 +367,22 @@ final class HelpersTest extends TestCase {
             '7'               => 10,
         ];
 
-        $this->assertArrayNotHasKey('keys', Helpers::namespaceBatch($keys, '', ':'));
+        $this->assertSame([['solo', 50], ['7', 10]], Helpers::namespaceBatch($keys, '', ':')['keys']);
         $this->assertSame([['solo', 50], ['7', 10]], Helpers::namespaceBatch($keys, '', ':', true)['keys']);
         $this->assertSame([['1', 100]], Helpers::namespaceBatch(['user:1' => 100, 'user:1:settings' => 200], 'user', ':', true)['keys']);
+    }
+
+    public function testNamespaceBatchDirectKeysLimit(): void {
+        $keys = [];
+
+        for ($i = 0; $i < Helpers::NAMESPACE_DIRECT_KEYS + 10; $i++) {
+            $keys['direct'.$i] = 1;
+        }
+
+        // Without the request for all of them, only the first NAMESPACE_DIRECT_KEYS are sent; the count stays exact.
+        $this->assertCount(Helpers::NAMESPACE_DIRECT_KEYS, Helpers::namespaceBatch($keys, '', ':')['keys']);
+        $this->assertCount(Helpers::NAMESPACE_DIRECT_KEYS + 10, Helpers::namespaceBatch($keys, '', ':', true)['keys']);
+        $this->assertSame(Helpers::NAMESPACE_DIRECT_KEYS + 10, Helpers::namespaceBatch($keys, '', ':')['direct'][0]);
     }
 
     public function testNamespaceBatchWithPrefix(): void {
@@ -403,6 +416,6 @@ final class HelpersTest extends TestCase {
     }
 
     public function testNamespaceBatchEmpty(): void {
-        $this->assertSame(['direct' => [0, 0, []], 'namespaces' => []], Helpers::namespaceBatch([], 'x', ':'));
+        $this->assertSame(['direct' => [0, 0, []], 'namespaces' => [], 'keys' => []], Helpers::namespaceBatch([], 'x', ':'));
     }
 }

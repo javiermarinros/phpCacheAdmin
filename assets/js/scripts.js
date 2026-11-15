@@ -1626,6 +1626,7 @@ class NamespaceView {
         this.separator = element.dataset.separator;
         this.per_page = parseInt(element.dataset.perPage, 10) || 100;
         this.title_keys = parseInt(element.dataset.titleKeys, 10) || 0;
+        this.direct_keys = parseInt(element.dataset.directKeys, 10) || 0;
         this.total = element.dataset.total === '' ? null : parseInt(element.dataset.total, 10);
         this.expanded = false;
         this.levels = new WeakMap();
@@ -1697,7 +1698,8 @@ class NamespaceView {
 
     #load(content) {
         // A direct keys list (data-direct) scans the same prefix, but keeps the [name, size] of each direct key.
-        const level = {prefix: content.dataset.namespace, keys: content.dataset.direct === '1' ? [] : null, cursor: '0', scanned: 0, direct: [0, 0, []], namespaces: new Map(), list: null, page: 1};
+        // direct_list: the direct keys sent with the batches, kept while the level has at most 'direct_keys' of them.
+        const level = {prefix: content.dataset.namespace, keys: content.dataset.direct === '1' ? [] : null, direct_list: [], cursor: '0', scanned: 0, direct: [0, 0, []], namespaces: new Map(), list: null, page: 1};
 
         this.levels.set(content, level);
         content.replaceChildren(this.#message('ns-progress', 'Waiting...'));
@@ -1743,6 +1745,14 @@ class NamespaceView {
         }
 
         const [count, size, names] = data.direct;
+
+        // The server sends only the first 'direct_keys' direct keys of a batch: once some are missing, the list is incomplete.
+        if (level.direct_list && (data.keys.length < count || level.direct_list.length + count > this.direct_keys)) {
+            level.direct_list = null;
+        } else if (level.direct_list) {
+            level.direct_list.push(...data.keys);
+        }
+
         level.direct[0] += count;
         level.direct[1] += size;
         level.direct[2].push(...names.slice(0, this.title_keys - level.direct[2].length));
@@ -1790,8 +1800,15 @@ class NamespaceView {
             this.#names_title(label, direct_count, direct_names);
             row.querySelector('.ns-size').textContent = format_bytes(direct_size);
             this.#size_bar(row, direct_size, total_size);
-            row.querySelector('.namespace-children-content').dataset.namespace = level.prefix;
+            const keys_content = row.querySelector('.namespace-children-content');
+            keys_content.dataset.namespace = level.prefix;
             nodes.push(row);
+
+            // All the direct keys came with the scan: the list is ready, opening it does not scan again.
+            if (level.direct_list) {
+                this.levels.set(keys_content, {prefix: level.prefix, keys: level.direct_list, list: [...level.direct_list].sort((a, b) => b[1] - a[1]), page: 1});
+                this.#render_keys(keys_content);
+            }
         }
 
         const pager = pages > 1 ? this.#pager(level, pages) : null;

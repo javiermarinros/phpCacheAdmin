@@ -12,6 +12,12 @@ use JsonException;
 
 class Helpers {
     /**
+     * Direct keys sent with each batch of the namespace view: a level with this many or fewer opens its list of direct
+     * keys at once, without a second scan.
+     */
+    public const NAMESPACE_DIRECT_KEYS = 150;
+
+    /**
      * @param string $icon Icon name from `assets/icons/`, custom path or svg code.
      */
     public static function svg(string $icon, ?int $size = 16, ?string $class = null): string {
@@ -560,13 +566,14 @@ class Helpers {
      * adds up the batches, then sorts and pages the namespaces. The key names (shown on hover) are capped at 'nstitlekeys'.
      *
      * @param iterable<int|string, int> $keys        Key => size in bytes, only keys inside the prefix.
-     * @param bool                      $direct_keys Also list every direct key of the level (the browser asks for them
-     *                                               only when the direct keys row is opened).
+     * @param bool                      $direct_keys List every direct key of the level (the browser asks for them
+     *                                               when the direct keys row is opened and the level has more than
+     *                                               NAMESPACE_DIRECT_KEYS), not only the first NAMESPACE_DIRECT_KEYS.
      *
      * @return array{
      *     direct: array{0: int, 1: int, 2: array<int, string>},
      *     namespaces: array<int, array{0: string, 1: int, 2: int, 3: int, 4: int, 5: array<int, string>}>,
-     *     keys?: array<int, array{0: string, 1: int}>,
+     *     keys: array<int, array{0: string, 1: int}>,
      * } direct: [count, size, names]; namespaces: [name, count, size, has children (0/1), direct keys, direct key names];
      *   keys: [name, size] of the direct keys
      */
@@ -590,7 +597,7 @@ class Helpers {
                     $direct[2][] = $parts[0];
                 }
 
-                if ($direct_keys) {
+                if ($direct_keys || count($list) < self::NAMESPACE_DIRECT_KEYS) {
                     $list[] = [$parts[0], $size];
                 }
 
@@ -609,7 +616,7 @@ class Helpers {
             }
         }
 
-        return ['direct' => $direct, 'namespaces' => array_values($namespaces)] + ($direct_keys ? ['keys' => $list] : []);
+        return ['direct' => $direct, 'namespaces' => array_values($namespaces), 'keys' => $list];
     }
 
     /**

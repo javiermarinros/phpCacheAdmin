@@ -14,7 +14,7 @@
     </div>
 {% endset %}
 
-<div class="namespaceview" data-separator="{{ separator }}" data-per-page="{{ get('nspp', config('nsperpage', 100)) }}" data-title-keys="{{ config('nstitlekeys', 25) }}"
+<div class="namespaceview" data-separator="{{ separator }}" data-per-page="{{ get('nspp', config('nsperpage', 100)) }}" data-title-keys="{{ config('nstitlekeys', 25) }}" data-direct-keys="{{ constant('RobiNN\\Pca\\Helpers::NAMESPACE_DIRECT_KEYS') }}"
      data-total="{{ search_value is empty ? all_keys : '' }}" data-filter-url="{{ link([], {view: 'table'}) }}">
     <div class="flex gap-2 py-2 px-6 border-t border-gray-200 dark:border-gray-700">
         <button type="button" class="py-1 px-2 text-xs text-gray-900 bg-gray-100 rounded dark:text-gray-100 dark:bg-gray-900 hover:bg-gray-300 expand-all-namespaces dark:hover:bg-gray-700">
