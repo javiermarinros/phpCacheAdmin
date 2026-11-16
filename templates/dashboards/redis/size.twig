@@ -1,0 +1,123 @@
+{% import 'components/macros.twig' as macros %}
+
+{{ include('dashboards/redis/sample_form.twig', {
+    button: 'Measure sizes',
+    note: 'Scans up to the sample size with SCAN and reads the memory usage, type, TTL and item count of each key. Numbers in the keys are read as {id} and long hex strings as {hash}, so keys with the same shape share a pattern.',
+}) }}
+
+{% if tab_message %}
+    <div class="p-4 card text-center text-gray-600 dark:text-gray-300">{{ tab_message }}</div>
+{% elseif result is null %}
+    <div class="p-4 card text-center text-gray-600 dark:text-gray-300">
+        Measure the sizes to see which key patterns use the memory, how long they live and which keys are the biggest.
+    </div>
+{% else %}
+    <div class="grid grid-cols-2 gap-4 mb-4 xl:grid-cols-4">
+        {% for tile in result.tiles %}
+            <div class="p-4 card">
+                <h3 class="text-xs font-bold uppercase text-primary-900 dark:text-primary-400">{{ tile.label }}</h3>
+                <p class="mt-1 text-xl font-semibold text-gray-900 dark:text-white">{{ tile.value }}</p>
+                <p class="mt-1 text-xs text-gray-600 dark:text-gray-300">{{ tile.note }}</p>
+            </div>
+        {% endfor %}
+    </div>
+
+    {% set estimated = result.factor is not null and result.factor > 1 %}
+
+    {% for level, group in result.levels %}
+        <div class="p-4 card mb-4">
+            <h2 class="mb-1 text-sm font-bold uppercase text-primary-900 dark:text-primary-400">{{ level == 'prefix' ? 'Memory by prefix' : 'Memory by pattern' }}</h2>
+            <p class="mb-3 text-xs text-gray-600 dark:text-gray-300">
+                Top {{ group.rows|length }} of {{ group.total|number }} {{ level == 'prefix' ? 'prefixes (the first segment of the pattern)' : 'patterns' }}, by memory used in the sample.
+                {% if estimated %}
+                    The estimated columns scale the sample x{{ result.factor|number(2) }} to the whole database.
+                {% endif %}
+                The TTL columns count the sampled keys of each row by the time they have left.
+            </p>
+            <div class="overflow-auto max-h-96">
+                <table class="w-full text-left table-auto dark:text-gray-300">
+                    <thead class="sticky top-0 z-10 bg-white dark:bg-gray-800">
+                    <tr class="border-b border-gray-200 dark:border-gray-700 text-primary-900 dark:text-primary-400">
+                        <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap">{{ level == 'prefix' ? 'Prefix' : 'Pattern' }}</th>
+                        <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-20">Keys</th>
+                        {% if estimated %}
+                            <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-20">Est. keys</th>
+                        {% endif %}
+                        <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-24">Memory</th>
+                        {% if estimated %}
+                            <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-24">Est. memory</th>
+                        {% endif %}
+                        <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-24">Avg</th>
+                        <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-24">Max</th>
+                        <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-40">Share</th>
+                        {% for column in result.ttl_columns %}
+                            <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-20">{{ column }}</th>
+                        {% endfor %}
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {% for row in group.rows %}
+                        <tr class="hover:bg-gray-50 dark:hover:bg-white/5">
+                            <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 break-all min-w-40">{{ row.name }}</td>
+                            <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 whitespace-nowrap">{{ row.count|number }}</td>
+                            {% if estimated %}
+                                <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 whitespace-nowrap">{{ row.est_count|number }}</td>
+                            {% endif %}
+                            <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 whitespace-nowrap">{{ row.memory|bytes }}</td>
+                            {% if estimated %}
+                                <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 whitespace-nowrap">{{ row.est_memory|bytes }}</td>
+                            {% endif %}
+                            <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 whitespace-nowrap">{{ row.avg|bytes }}</td>
+                            <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 whitespace-nowrap">{{ row.max|bytes }}</td>
+                            <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700">
+                                <div class="flex gap-2 items-center">
+                                    <div class="grow">{{ macros.progress(row.percent, 'lower', null, 'info') }}</div>
+                                    <span class="shrink-0 text-xs text-gray-600 dark:text-gray-300">{{ row.percent }}%</span>
+                                </div>
+                            </td>
+                            {% for count in row.ttl %}
+                                <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 whitespace-nowrap">{{ count|number }}</td>
+                            {% endfor %}
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    {% endfor %}
+
+    <div class="p-4 card mb-4">
+        <h2 class="mb-1 text-sm font-bold uppercase text-primary-900 dark:text-primary-400">Biggest keys</h2>
+        <p class="mb-3 text-xs text-gray-600 dark:text-gray-300">The {{ result.top|length }} keys that use the most memory in the sample, with their internal encoding.</p>
+        <div class="overflow-auto max-h-96">
+            <table class="w-full text-left table-auto dark:text-gray-300">
+                <thead class="sticky top-0 z-10 bg-white dark:bg-gray-800">
+                <tr class="border-b border-gray-200 dark:border-gray-700 text-primary-900 dark:text-primary-400">
+                    <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap">Key</th>
+                    <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap">Pattern</th>
+                    <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-24">Type</th>
+                    <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-24">Encoding</th>
+                    <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-20">Items</th>
+                    <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-24">TTL</th>
+                    <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-24">Memory</th>
+                </tr>
+                </thead>
+                <tbody>
+                {% for row in result.top %}
+                    <tr class="hover:bg-gray-50 dark:hover:bg-white/5">
+                        <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 break-all min-w-40">
+                            <a href="{{ link([], {view: 'key', key: row.key}) }}" class="font-semibold text-primary-500 dark:text-primary-400 hover:text-primary-700 dark:hover:text-primary-500">{{ row.key }}</a>
+                        </td>
+                        <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 break-all min-w-40">{{ row.pattern }}</td>
+                        <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700">{{ macros.key_type(row.type) }}</td>
+                        <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 whitespace-nowrap">{{ row.encoding ?: '-' }}</td>
+                        <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 whitespace-nowrap">{{ row.items is null ? '-' : row.items|number }}</td>
+                        <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 whitespace-nowrap">{{ row.ttl < 0 ? 'Never' : row.ttl|seconds(false) }}</td>
+                        <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 whitespace-nowrap">{{ row.size|bytes }}</td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+{% endif %}

@@ -135,11 +135,14 @@ interface RedisCompatibilityInterface {
     /**
      * Pipeline keys for better performance.
      *
+     * With $access, each key also gets 'freq' (OBJECT FREQ, LFU policies) and 'idle' (OBJECT IDLETIME, LRU policies),
+     * null when the maxmemory-policy does not track it.
+     *
      * @param array<int, string> $keys
      *
      * @return array<string, mixed>
      */
-    public function pipelineKeys(array $keys): array;
+    public function pipelineKeys(array $keys, bool $access = false): array;
 
     /**
      * Get key size.

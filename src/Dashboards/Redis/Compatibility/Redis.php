@@ -289,7 +289,7 @@ class Redis extends \Redis implements RedisCompatibilityInterface {
      *
      * @throws RedisException
      */
-    public function pipelineKeys(array $keys): array {
+    public function pipelineKeys(array $keys, bool $access = false): array {
         $lua_script = file_get_contents(__DIR__.'/get_key_info.lua');
 
         if ($lua_script === false) {
@@ -305,7 +305,7 @@ class Redis extends \Redis implements RedisCompatibilityInterface {
         $pipe = $this->pipeline();
 
         foreach ($keys as $key) {
-            $pipe->evalsha($script_sha, [$key], 1);
+            $pipe->evalsha($script_sha, [$key, $access ? 'access' : ''], 1);
         }
 
         $results = $pipe->exec();
@@ -328,6 +328,10 @@ class Redis extends \Redis implements RedisCompatibilityInterface {
                 'size'  => $result[2] ?? 0,
                 'count' => isset($result[3]) && is_numeric($result[3]) ? (int) $result[3] : null,
             ];
+
+            if ($access) {
+                $data[$key] += $this->keyAccessInfo($result);
+            }
         }
 
         return $data;

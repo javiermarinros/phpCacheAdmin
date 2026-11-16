@@ -30,16 +30,18 @@ trait AnalysisTrait {
      *
      * @param array<int, array<string, mixed>> $buffer
      * @param array<string, mixed>             $row
+     * @param int|null                         $limit How many rows the list keeps, $top_items by default.
      */
-    private function collectTop(array &$buffer, array $row, string $column): void {
+    private function collectTop(array &$buffer, array $row, string $column, ?int $limit = null): void {
         if (isset($this->top_thresholds[$column]) && $row[$column] <= $this->top_thresholds[$column]) {
             return;
         }
 
         $buffer[] = $row;
+        $limit ??= $this->top_items;
 
-        if (count($buffer) >= $this->top_items * 10) {
-            $buffer = $this->topRows($buffer, $column, $this->top_items);
+        if (count($buffer) >= $limit * 10) {
+            $buffer = $this->topRows($buffer, $column, $limit);
             $this->top_thresholds[$column] = (int) end($buffer)[$column];
         }
     }

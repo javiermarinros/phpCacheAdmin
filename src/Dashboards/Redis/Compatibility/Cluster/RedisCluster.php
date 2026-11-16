@@ -301,7 +301,7 @@ class RedisCluster extends \RedisCluster implements RedisCompatibilityInterface 
      *
      * @throws RedisClusterException
      */
-    public function pipelineKeys(array $keys): array {
+    public function pipelineKeys(array $keys, bool $access = false): array {
         $lua_script = file_get_contents(__DIR__.'/../get_key_info.lua');
 
         if ($lua_script === false) {
@@ -323,7 +323,7 @@ class RedisCluster extends \RedisCluster implements RedisCompatibilityInterface 
         $data = [];
 
         foreach ($keys as $key) {
-            $results = $this->evalsha($script_sha, [$key], 1);
+            $results = $this->evalsha($script_sha, [$key, $access ? 'access' : ''], 1);
 
             if (is_array($results) && count($results) >= 3) {
                 $data[$key] = [
@@ -332,6 +332,10 @@ class RedisCluster extends \RedisCluster implements RedisCompatibilityInterface 
                     'size'  => $results[2] ?? 0,
                     'count' => isset($results[3]) && is_numeric($results[3]) ? (int) $results[3] : null,
                 ];
+
+                if ($access) {
+                    $data[$key] += $this->keyAccessInfo($results);
+                }
             }
         }
 

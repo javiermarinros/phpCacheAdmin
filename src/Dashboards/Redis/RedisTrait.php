@@ -23,6 +23,7 @@ trait RedisTrait {
     use RedisPanels;
     use RedisHealth;
     use RedisAnalysis;
+    use RedisKeyStats;
     use RedisLatency;
     use RedisClients;
     use RedisKeyView;
@@ -39,6 +40,8 @@ trait RedisTrait {
     private array $tabs = [
         'keys'     => 'Keys',
         'analysis' => 'Analysis',
+        'size'     => 'Size',
+        'hotkeys'  => 'Hot keys',
         'slowlog'  => 'Slow Log',
         'latency'  => 'Latency',
         'metrics'  => 'Metrics',
@@ -265,6 +268,8 @@ trait RedisTrait {
         $tab_data = match ($tab) {
             'keys' => $this->keysTab(),
             'analysis' => $this->analysisTab(),
+            'size' => $this->sizeTab(),
+            'hotkeys' => $this->hotkeysTab(),
             'slowlog' => $this->slowlogTab(),
             'latency' => $this->latencyTab(),
             'metrics' => $this->metricsTab(),

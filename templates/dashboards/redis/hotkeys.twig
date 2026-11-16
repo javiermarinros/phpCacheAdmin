@@ -1,0 +1,106 @@
+{% import 'components/macros.twig' as macros %}
+
+{{ include('dashboards/redis/sample_form.twig', {
+    button: 'Find hot keys',
+    note: lfu
+        ? 'Scans up to the sample size with SCAN and reads the LFU access counter of each key (OBJECT FREQ), like redis-cli --hotkeys. The counter is logarithmic, from 0 to 255, and decays while a key is not used, so it ranks keys by how often they are read lately, it does not count reads.'
+        : 'The maxmemory-policy is "' ~ (policy ?: 'unknown') ~ '", not an LFU one, so the server keeps no access counter. This ranks keys by idle time instead (OBJECT IDLETIME): the keys used most recently, not the most often. Switch to allkeys-lfu or volatile-lfu for real hot keys.',
+}) }}
+
+{% if tab_message %}
+    <div class="p-4 card text-center text-gray-600 dark:text-gray-300">{{ tab_message }}</div>
+{% elseif result is null %}
+    <div class="p-4 card text-center text-gray-600 dark:text-gray-300">
+        Find the hot keys to see which keys and key patterns get the most reads.
+    </div>
+{% else %}
+    {% set freq = result.metric == 'freq' %}
+
+    <div class="grid grid-cols-2 gap-4 mb-4 xl:grid-cols-4">
+        {% for tile in result.tiles %}
+            <div class="p-4 card">
+                <h3 class="text-xs font-bold uppercase text-primary-900 dark:text-primary-400">{{ tile.label }}</h3>
+                <p class="mt-1 text-xl font-semibold text-gray-900 dark:text-white break-all">{{ tile.value }}</p>
+                <p class="mt-1 text-xs text-gray-600 dark:text-gray-300">{{ tile.note }}</p>
+            </div>
+        {% endfor %}
+    </div>
+
+    <div class="p-4 card mb-4">
+        <h2 class="mb-1 text-sm font-bold uppercase text-primary-900 dark:text-primary-400">Hot keys</h2>
+        <p class="mb-3 text-xs text-gray-600 dark:text-gray-300">
+            {% if freq %}
+                The {{ result.top|length }} keys with the highest access counter in the sample. Many keys can share the same counter.
+            {% else %}
+                The {{ result.top|length }} keys used most recently in the sample.
+            {% endif %}
+        </p>
+        <div class="overflow-auto max-h-96">
+            <table class="w-full text-left table-auto dark:text-gray-300">
+                <thead class="sticky top-0 z-10 bg-white dark:bg-gray-800">
+                <tr class="border-b border-gray-200 dark:border-gray-700 text-primary-900 dark:text-primary-400">
+                    <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap">Key</th>
+                    <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap">Pattern</th>
+                    <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-24">Type</th>
+                    <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-24">{{ freq ? 'Counter' : 'Idle' }}</th>
+                    <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-24">TTL</th>
+                    <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-24">Memory</th>
+                </tr>
+                </thead>
+                <tbody>
+                {% for row in result.top %}
+                    <tr class="hover:bg-gray-50 dark:hover:bg-white/5">
+                        <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 break-all min-w-40">
+                            <a href="{{ link([], {view: 'key', key: row.key}) }}" class="font-semibold text-primary-500 dark:text-primary-400 hover:text-primary-700 dark:hover:text-primary-500">{{ row.key }}</a>
+                        </td>
+                        <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 break-all min-w-40">{{ row.pattern }}</td>
+                        <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700">{{ macros.key_type(row.type) }}</td>
+                        <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 whitespace-nowrap">{{ freq ? row.value|number : row.value|seconds }}</td>
+                        <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 whitespace-nowrap">{{ row.ttl < 0 ? 'Never' : row.ttl|seconds(false) }}</td>
+                        <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 whitespace-nowrap">{{ row.size|bytes }}</td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="p-4 card mb-4">
+        <h2 class="mb-1 text-sm font-bold uppercase text-primary-900 dark:text-primary-400">Hot patterns</h2>
+        <p class="mb-3 text-xs text-gray-600 dark:text-gray-300">
+            Top {{ result.patterns|length }} of {{ result.total|number }} patterns,
+            {{ freq ? 'by their share of all the access counters in the sample: many warm keys can weigh more than one hot key.' : 'by the lowest average idle time.' }}
+        </p>
+        <div class="overflow-auto max-h-96">
+            <table class="w-full text-left table-auto dark:text-gray-300">
+                <thead class="sticky top-0 z-10 bg-white dark:bg-gray-800">
+                <tr class="border-b border-gray-200 dark:border-gray-700 text-primary-900 dark:text-primary-400">
+                    <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap">Pattern</th>
+                    <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-20">Keys</th>
+                    <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-24">{{ freq ? 'Avg counter' : 'Avg idle' }}</th>
+                    <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-24">{{ freq ? 'Max counter' : 'Min idle' }}</th>
+                    <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-24">Memory</th>
+                    <th class="py-2 px-4 text-xs font-bold uppercase whitespace-nowrap w-40">Share</th>
+                </tr>
+                </thead>
+                <tbody>
+                {% for row in result.patterns %}
+                    <tr class="hover:bg-gray-50 dark:hover:bg-white/5">
+                        <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 break-all min-w-40">{{ row.name }}</td>
+                        <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 whitespace-nowrap">{{ row.count|number }}</td>
+                        <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 whitespace-nowrap">{{ freq ? row.avg|number(1) : row.avg|round|seconds }}</td>
+                        <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 whitespace-nowrap">{{ freq ? row.best|number : row.best|seconds }}</td>
+                        <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700 whitespace-nowrap">{{ row.memory|bytes }}</td>
+                        <td class="py-2 px-4 text-sm border-t border-gray-200 dark:text-gray-300 dark:border-gray-700">
+                            <div class="flex gap-2 items-center">
+                                <div class="grow">{{ macros.progress(row.percent, 'lower', null, 'info') }}</div>
+                                <span class="shrink-0 text-xs text-gray-600 dark:text-gray-300">{{ row.percent }}%</span>
+                            </div>
+                        </td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+{% endif %}

@@ -1,0 +1,45 @@
+<div class="p-4 card mb-4">
+    <form method="get" class="flex flex-wrap gap-3 items-end">
+        <input type="hidden" name="dashboard" value="redis">
+        <input type="hidden" name="tab" value="{{ tab }}">
+        {% if get('server') is not null %}
+            <input type="hidden" name="server" value="{{ get('server') }}">
+        {% endif %}
+        {% if get('db') is not null %}
+            <input type="hidden" name="db" value="{{ get('db') }}">
+        {% endif %}
+
+        <div class="w-full sm:w-48">
+            {{ include('components/input.twig', {
+                id: 'pattern',
+                label: 'Match pattern',
+                value: pattern,
+                wrapper_class: 'flex flex-col',
+            }) }}
+        </div>
+
+        <div class="w-full sm:w-36">
+            {{ include('components/input.twig', {
+                id: 'sample',
+                label: 'Sample size',
+                value: sample_size,
+                type: 'number',
+                wrapper_class: 'flex flex-col',
+            }) }}
+        </div>
+
+        {{ include('components/button.twig', {
+            id: 'run',
+            text: button,
+            color: 'green',
+            submit: true,
+            attributes: {value: '1'},
+        }) }}
+
+        <p class="w-full text-xs text-gray-600 dark:text-gray-300">
+            {{ note }}
+            The database currently holds {{ total_keys|number }} keys.
+            Above the sample size this is a sample, not the whole keyspace.
+        </p>
+    </form>
+</div>

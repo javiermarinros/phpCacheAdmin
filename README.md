@@ -36,6 +36,8 @@
 - Search within a key's sub-items (hash fields, set/list/sorted set members).
 - **Stream consumer groups** with their consumers, pending entries, lag, and the oldest entry still waiting for an acknowledgement.
 - **Analysis** of the keyspace, next to the size distribution of every key in the database that the server tracks on its own (Redis >= 8).
+- **Size** of a SCAN sample grouped by key pattern (numbers read as `{id}`), with each pattern's memory, average and largest key, TTLs, the estimate for the whole database, and the biggest keys with their encoding.
+- **Hot keys** of a SCAN sample by the LFU access counter (OBJECT FREQ), like `redis-cli --hotkeys`, also per key pattern. Under a non-LFU policy it ranks by idle time instead.
 - **Latency** with the events recorded by the latency monitor and their history, per-command latency percentiles, and the advice of LATENCY / MEMORY DOCTOR.
 - **Clients** list of the connected clients with their idle time, memory and last command, and the option to disconnect any of them.
 - **Profiler** to watch commands as they run, live, via MONITOR. Watches every node at once in a cluster.

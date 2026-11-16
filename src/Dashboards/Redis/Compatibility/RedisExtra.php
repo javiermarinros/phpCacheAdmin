@@ -22,6 +22,23 @@ trait RedisExtra {
     private ?array $modules_cache = null;
 
     /**
+     * The access fields that get_key_info.lua appends in "access" mode, -1 when the policy does not track them.
+     *
+     * @param array<int, mixed> $result
+     *
+     * @return array{freq: int|null, idle: int|null}
+     */
+    protected function keyAccessInfo(array $result): array {
+        $freq = $result[4] ?? -1;
+        $idle = $result[5] ?? -1;
+
+        return [
+            'freq' => is_numeric($freq) && (int) $freq >= 0 ? (int) $freq : null,
+            'idle' => is_numeric($idle) && (int) $idle >= 0 ? (int) $idle : null,
+        ];
+    }
+
+    /**
      * HEXPIRE and HPERSIST reply with one value per field; anything above zero means it was applied.
      */
     protected function hashFieldExpireApplied(mixed $reply): bool {
