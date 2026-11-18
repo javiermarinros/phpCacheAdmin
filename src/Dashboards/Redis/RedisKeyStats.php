@@ -40,7 +40,8 @@ trait RedisKeyStats {
 
         return [
             'pattern'     => $pattern !== '' ? $pattern : '*',
-            'sample_size' => max(100, min((int) Http::get('sample', $this->default_sample), 500_000)),
+            // No upper limit: statsScan() streams the keys in batches and keeps only the totals, so memory stays flat.
+            'sample_size' => max(100, (int) Http::get('sample', $this->default_sample)),
             'total_keys'  => $this->redis->databaseSize(),
         ];
     }
